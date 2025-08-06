@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from x10.perpetual.configuration import MAINNET_CONFIG
 from x10.perpetual.orders import OrderSide
 from x10.perpetual.trading_client import PerpetualTradingClient
+from x10.perpetual.simple_client.simple_trading_client import BlockingTradingClient
 
 from account import stark_account
 
@@ -13,7 +14,7 @@ load_dotenv()
 
 async def main():
     # 1. Instanciate Asynchron Client
-    trading_client = PerpetualTradingClient(
+    trading_client = BlockingTradingClient(
         endpoint_config=MAINNET_CONFIG,
         stark_account=stark_account,
     )

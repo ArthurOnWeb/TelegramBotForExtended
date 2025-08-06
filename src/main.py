@@ -19,7 +19,7 @@ async def main():
     )
 
     # 2. Create a limit BUY order
-    placed_order = await trading_client.orders.create_order(
+    placed_order = await trading_client.orders.place_order(
         market_name="BTC-USD",
         amount_of_synthetic=Decimal("1"),
         price=Decimal("63000.1"),

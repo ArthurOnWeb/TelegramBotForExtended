@@ -3,7 +3,7 @@ import asyncio
 from decimal import Decimal
 
 from dotenv import load_dotenv
-from x10.perpetual.configuration import TESTNET_CONFIG
+from x10.perpetual.configuration import MAINNET_CONFIG
 from x10.perpetual.orders import OrderSide
 from x10.perpetual.trading_client import PerpetualTradingClient
 
@@ -34,3 +34,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

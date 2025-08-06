@@ -31,9 +31,10 @@ async def main():
     print("Ordre placé :", placed_order)
 
     # 3. Cancel the order
-    await trading_client.orders.cancel_order(order_id=placed_order.id)
+    await trading_client.cancel_order(order_id=placed_order.id)
     print(f"Ordre {placed_order.id} annulé")
 
+    await trading_client.close()
 if __name__ == "__main__":
     asyncio.run(main())
 

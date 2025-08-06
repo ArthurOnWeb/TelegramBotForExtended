@@ -16,7 +16,7 @@ async def main():
     # 1. Instanciate Asynchron Client
     trading_client = BlockingTradingClient(
         endpoint_config=MAINNET_CONFIG,
-        stark_account=stark_account,
+        account=stark_account,
     )
 
     # 2. Create a limit BUY order

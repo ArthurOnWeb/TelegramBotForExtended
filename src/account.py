@@ -44,28 +44,11 @@ class TradingAccount:
         return self.stark_account
 
     async def close(self) -> None:
-        """Close underlying HTTP sessions for created clients.
-
-        Some client implementations expose a ``close_session`` coroutine instead
-        of a plain ``close`` method.  To be defensive we try a few common method
-        names and fall back to closing an explicit ``session`` attribute when
-        present.  This ensures we properly release network resources and avoid
-        warnings about unclosed sessions.
-        """
-
-        async def _maybe_close(obj, *method_names):
-            for name in method_names:
-                method = getattr(obj, name, None)
-                if method:
-                    result = method()
-                    if inspect.isawaitable(result):
-                        await result
-                    return True
-            return False
-
+        """Close underlying HTTP sessions for created clients."""
         for client in (self.async_client, self.blocking_client):
-            closed = await _maybe_close(client, "close", "close_session", "aclose")
-            if not closed:
-                session = getattr(client, "session", None)
-                if session:
-                    await _maybe_close(session, "close", "aclose")
+            close_method = getattr(client, "close", None)
+            if close_method:
+                if inspect.iscoroutinefunction(close_method):
+                    await close_method()
+                else:
+                    close_method()

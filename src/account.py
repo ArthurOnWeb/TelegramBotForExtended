@@ -9,7 +9,6 @@ load_dotenv()
 
 class TradingAccount:
     def __init__(self):
-        self.network = network.upper()
         self.endpoint_config = MAINNET_CONFIG
 
         self.api_key = os.getenv("API_KEY")

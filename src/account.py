@@ -57,10 +57,9 @@ class TradingAccount:
             for name in method_names:
                 method = getattr(obj, name, None)
                 if method:
-                    if inspect.iscoroutinefunction(method):
-                        await method()
-                    else:
-                        method()
+                    result = method()
+                    if inspect.isawaitable(result):
+                        await result
                     return True
             return False
 

@@ -2,8 +2,7 @@
 # order_manager.py
 from decimal import Decimal
 from x10.perpetual.orders import OrderSide
-from x10.perpetual.trading_client.order_management_module.py import PerpetualTradingClient
-
+from x10.perpetual.trading_client import PerpetualTradingClient
 
 async def place_limit_order(
     client: PerpetualTradingClient,

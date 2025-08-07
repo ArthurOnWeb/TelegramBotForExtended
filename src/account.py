@@ -1,4 +1,5 @@
 import os
+import inspect
 from dotenv import load_dotenv
 from x10.perpetual.accounts import StarkPerpetualAccount
 from x10.perpetual.trading_client import PerpetualTradingClient
@@ -41,3 +42,13 @@ class TradingAccount:
 
     def get_account(self) -> StarkPerpetualAccount:
         return self.stark_account
+
+    async def close(self) -> None:
+        """Close underlying HTTP sessions for created clients."""
+        for client in (self.async_client, self.blocking_client):
+            close_method = getattr(client, "close", None)
+            if close_method:
+                if inspect.iscoroutinefunction(close_method):
+                    await close_method()
+                else:
+                    close_method()

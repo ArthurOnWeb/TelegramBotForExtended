@@ -23,7 +23,7 @@ async def place_limit_order(
     :param post_only: True = maker only
     :return: object of the placed order
     """
-    placed_order = await trading_client.create_and_place_order(
+    placed_order = await client.place_order(
         market_name=market,
         amount_of_synthetic=quantity,
         price=price,

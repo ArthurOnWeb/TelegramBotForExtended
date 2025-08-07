@@ -1,96 +1,112 @@
-# order_manager.py
-from decimal import Decimal
-from x10.perpetual.orders import OrderSide
-from x10.perpetual.simple_client.simple_trading_client import BlockingTradingClient
+"""Order management module using ``PerpetualTradingClient``.
+
+This replaces the previous implementation that relied on
+``BlockingTradingClient`` by providing an asynchronous module compatible
+with ``PerpetualTradingClient``.  The module exposes helpers to place and
+cancel orders as well as perform mass cancellations.
+"""
+
+from typing import List, Optional
+
+from x10.perpetual.orders import PerpetualOrderModel, PlacedOrderModel
+from x10.perpetual.trading_client.base_module import BaseModule
+from x10.utils.http import send_delete_request, send_post_request
+from x10.utils.log import get_logger
+from x10.utils.model import EmptyModel, X10BaseModel
+
+LOGGER = get_logger(__name__)
 
 
-async def place_limit_order(
-    client: BlockingTradingClient,
-    market: str,
-    quantity: Decimal,
-    price: Decimal,
-    side: OrderSide,
-    post_only: bool = True,
-):
-    """
-    Place a limit order (BUY or SELL) using blocking client.
+class _MassCancelRequestModel(X10BaseModel):
+    """Request model for the mass cancellation endpoint."""
 
-    :param client: BlockingTradingClient
-    :param market: market name (ex: BTC-USD)
-    :param quantity: size of the order
-    :param price: limit price
-    :param side: OrderSide.BUY ou OrderSide.SELL
-    :param post_only: True = maker only
-    :return: object of the placed order
-    """
-    placed_order = await client.create_and_place_order(
-        market_name=market,
-        amount_of_synthetic=quantity,
-        price=price,
-        side=side,
-        post_only=post_only,
-    )
-    print(f"✅ Order {side.name} placed at {price} on {market} (id: {placed_order.id})")
-    return placed_order
+    order_ids: Optional[List[int]] = None
+    external_order_ids: Optional[List[str]] = None
+    markets: Optional[List[str]] = None
+    cancel_all: Optional[bool] = None
 
 
-async def cancel_order(client: BlockingTradingClient, order_id: str):
-    """
-    Cancel an order using its ID
+class OrderManagementModule(BaseModule):
+    """Module providing order placement and cancellation helpers."""
 
-    :param client: BlockingTradingClient
-    :param order_id: Id of the order to cancel
-    """
-    await client.cancel_order(order_id=order_id)
-    print(f"❌ Order {order_id} canceled")
+    async def place_order(self, order: PerpetualOrderModel):
+        """Place a new order on the exchange.
 
+        Parameters
+        ----------
+        order:
+            Order object created by ``create_order_object`` method.
 
-async def place_order_with_tp_sl(
-    client: BlockingTradingClient,
-    market: str,
-    quantity: Decimal,
-    price: Decimal,
-    side: OrderSide,
-) -> object:
-    """
-    Place an order with embedded take profit and stop loss.
+        See Also
+        --------
+        https://api.docs.extended.exchange/#create-order
+        """
 
-    The take profit and stop loss are placed at ±0.05% of the entry
-    price and sent in a single request.
+        LOGGER.debug("Placing an order: id=%s", order.id)
 
-    :param client: BlockingTradingClient
-    :param market: market name (ex: BTC-USD)
-    :param quantity: size of the order
-    :param price: entry price
-    :param side: OrderSide.BUY or OrderSide.SELL for the entry
-    :return: object of the placed order
-    """
+        url = self._get_url("/user/order")
+        response = await send_post_request(
+            await self.get_session(),
+            url,
+            PlacedOrderModel,
+            json=order.to_api_request_json(),
+            api_key=self._get_api_key(),
+        )
+        return response
 
-    # Determine TP and SL prices relative to the entry
-    tp_factor = Decimal("1.0005")
-    sl_factor = Decimal("0.9995")
+    async def cancel_order(self, order_id: int):
+        """Cancel an order by its internal identifier.
 
-    if side == OrderSide.BUY:
-        tp_price = price * tp_factor
-        sl_price = price * sl_factor
-    else:
-        tp_price = price * sl_factor
-        sl_price = price * tp_factor
+        https://api.docs.extended.exchange/#cancel-order
+        """
 
-    # Place the entry order with embedded TP and SL
-    entry_order = await client.create_and_place_order(
-        market_name=market,
-        amount_of_synthetic=quantity,
-        price=price,
-        side=side,
-        post_only=True,
-        tpSlType="BOTH",
-        takeProfit={"triggerPrice": tp_price, "price": tp_price},
-        stopLoss={"triggerPrice": sl_price, "price": sl_price},
-    )
+        url = self._get_url("/user/order/<order_id>", order_id=order_id)
+        return await send_delete_request(
+            await self.get_session(),
+            url,
+            EmptyModel,
+            api_key=self._get_api_key(),
+        )
 
-    print(
-        f"✅ Order {side.name} placed at {price} on {market} (id: {entry_order.id})"
-    )
+    async def cancel_order_by_external_id(self, order_external_id: str):
+        """Cancel an order using its external identifier.
 
-    return entry_order
+        https://api.docs.extended.exchange/#cancel-order
+        """
+
+        url = self._get_url("/user/order", query={"externalId": order_external_id})
+        return await send_delete_request(
+            await self.get_session(),
+            url,
+            EmptyModel,
+            api_key=self._get_api_key(),
+        )
+
+    async def mass_cancel(
+        self,
+        *,
+        order_ids: Optional[List[int]] = None,
+        external_order_ids: Optional[List[str]] = None,
+        markets: Optional[List[str]] = None,
+        cancel_all: Optional[bool] = False,
+    ):
+        """Cancel multiple orders in a single request.
+
+        https://api.docs.extended.exchange/#mass-cancel
+        """
+
+        url = self._get_url("/user/order/massCancel")
+        request_model = _MassCancelRequestModel(
+            order_ids=order_ids,
+            external_order_ids=external_order_ids,
+            markets=markets,
+            cancel_all=cancel_all,
+        )
+        return await send_post_request(
+            await self.get_session(),
+            url,
+            EmptyModel,
+            json=request_model.to_api_request_json(exclude_none=True),
+            api_key=self._get_api_key(),
+        )
+

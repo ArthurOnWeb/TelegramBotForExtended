@@ -4,27 +4,34 @@ from decimal import Decimal
 
 from x10.perpetual.orders import OrderSide
 
-from account import stark_account
-from account import blocking_client
+from x10.perpetual.orderbook import OrderBook
+from x10.perpetual.configuration import MAINNET_CONFIG
+
+from utils import clean_account, setup_logging
+
+from account import TradingAccount
+
+from order_manager import place_limit_order, cancel_order
 
 async def main():
+    setup_logging()
+    account = TradingAccount()
+    client = account.get_blocking_client()
 
     # 1. Create a limit BUY order
-    placed_order = await blocking_client.create_and_place_order(
-                        market_name="BTC-USD",
-                        amount_of_synthetic=Decimal("0.01"),
-                        price=70000,
-                        side=OrderSide.BUY,
-                        post_only=True,
-
+    order = await place_limit_order(
+        client=client,
+        market="BTC-USD",
+        quantity=Decimal("0.01"),
+        price=Decimal("70000"),
+        side=OrderSide.BUY,
     )
-    print("Ordre placé :", placed_order)
 
     # 2. Cancel the order
-    await blocking_client.cancel_order(order_id=placed_order.id)
-    print(f"Ordre {placed_order.id} annulé")
-
+    await cancel_order(client, order_id=order.id)
+    
     await blocking_client.close()
+
 if __name__ == "__main__":
     asyncio.run(main())
 

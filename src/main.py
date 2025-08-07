@@ -30,8 +30,6 @@ async def main():
     # 2. Cancel the order
     await cancel_order(client, order_id=order.id)
     
-    await blocking_client.close()
-
 if __name__ == "__main__":
     asyncio.run(main())
 

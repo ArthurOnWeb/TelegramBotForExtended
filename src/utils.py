@@ -2,7 +2,7 @@ import logging
 from typing import Optional
 from x10.perpetual.trading_client import PerpetualTradingClient
 
-logger = logging.getLogger("extendee_bot")
+logger = logging.getLogger("extended_bot")
 
 def setup_logging(log_level: int = logging.INFO):
     """Initialise logger"""

@@ -13,7 +13,7 @@ from order_manager import place_order_with_tp_sl
 async def main():
     setup_logging()
     account = TradingAccount()
-    client = account.get_async_client()
+    client = account.get_blocking_client()
 
     # Place a BUY order with attached TP and SL
     await place_order_with_tp_sl(

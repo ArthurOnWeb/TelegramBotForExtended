@@ -18,17 +18,20 @@ async def main():
     account = TradingAccount()
     client = account.get_blocking_client()
 
-    # 1. Create a limit BUY order
-    order = await place_limit_order(
-        client=client,
-        market="BTC-USD",
-        quantity=Decimal("0.01"),
-        price=Decimal("70000"),
-        side=OrderSide.BUY,
-    )
+    try:
+        # 1. Create a limit BUY order
+        order = await place_limit_order(
+            client=client,
+            market="BTC-USD",
+            quantity=Decimal("0.01"),
+            price=Decimal("70000"),
+            side=OrderSide.BUY,
+        )
 
-    # 2. Cancel the order
-    await cancel_order(client, order_id=order.id)
+        # 2. Cancel the order
+        await cancel_order(client, order_id=order.id)
+    finally:
+        await account.close()
     
 if __name__ == "__main__":
     asyncio.run(main())

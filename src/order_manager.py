@@ -2,11 +2,11 @@
 # order_manager.py
 from decimal import Decimal
 from x10.perpetual.orders import OrderSide
-from x10.perpetual.simple_client.simple_trading_client import BlockingTradingClient
+from x10.perpetual.trading_client.order_management_module.py import PerpetualTradingClient
 
 
 async def place_limit_order(
-    client: BlockingTradingClient,
+    client: PerpetualTradingClient,
     market: str,
     quantity: Decimal,
     price: Decimal,
@@ -24,7 +24,7 @@ async def place_limit_order(
     :param post_only: True = maker only
     :return: object of the placed order
     """
-    placed_order = await client.create_and_place_order(
+    placed_order = await trading_client.create_and_place_order(
         market_name=market,
         amount_of_synthetic=quantity,
         price=price,
@@ -35,7 +35,7 @@ async def place_limit_order(
     return placed_order
 
 
-async def cancel_order(client: BlockingTradingClient, order_id: str):
+async def cancel_order(client: PerpetualTradingClient, order_id: str):
     """
     Cancel an order using its ID
 

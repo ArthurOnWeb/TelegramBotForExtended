@@ -1,5 +1,4 @@
 
-# order_manager.py
 from decimal import Decimal
 from x10.perpetual.orders import OrderSide
 from x10.perpetual.trading_client import PerpetualTradingClient
@@ -42,5 +41,5 @@ async def cancel_order(client: PerpetualTradingClient, order_id: str):
     :param client: BlockingTradingClient
     :param order_id: Id of the order to cancel
     """
-    await client.cancel_order(order_id=order_id)
+    await client.orders.cancel_order(order_id=order_id)
     print(f"❌ Order {order_id} canceled")

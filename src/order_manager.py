@@ -29,8 +29,7 @@ async def place_limit_order(
         side=side,
         post_only=post_only,
     )
-    # print(f"✅ Order {side.name} placed at {price} on {market} (id: {placed_order.id})")
-    print(f"✅ Order {side.name} placed at {price} on {market}")
+    print(f"✅ Order {side.name} placed at {price} on {market} (id: {placed_order.data.id})")
     return placed_order
 
 

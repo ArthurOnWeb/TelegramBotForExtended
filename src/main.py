@@ -8,7 +8,7 @@ from utils import setup_logging
 
 from account import TradingAccount
 
-from order_manager import place_limit_order
+from order_manager import place_limit_order,cancel_order
 
 async def main():
     setup_logging()

@@ -2,25 +2,15 @@
 import asyncio
 from decimal import Decimal
 
-from dotenv import load_dotenv
-from x10.perpetual.configuration import MAINNET_CONFIG
 from x10.perpetual.orders import OrderSide
-from x10.perpetual.trading_client import PerpetualTradingClient
-from x10.perpetual.simple_client.simple_trading_client import BlockingTradingClient
 
 from account import stark_account
-
-load_dotenv()
+from account import blocking_client
 
 async def main():
-    # 1. Instanciate Asynchron Client
-    trading_client = BlockingTradingClient(
-        endpoint_config=MAINNET_CONFIG,
-        account=stark_account,
-    )
 
-    # 2. Create a limit BUY order
-    placed_order = await trading_client.create_and_place_order(
+    # 1. Create a limit BUY order
+    placed_order = await blocking_client.create_and_place_order(
                         market_name="BTC-USD",
                         amount_of_synthetic=Decimal("0.01"),
                         price=70000,
@@ -30,11 +20,11 @@ async def main():
     )
     print("Ordre placé :", placed_order)
 
-    # 3. Cancel the order
-    await trading_client.cancel_order(order_id=placed_order.id)
+    # 2. Cancel the order
+    await blocking_client.cancel_order(order_id=placed_order.id)
     print(f"Ordre {placed_order.id} annulé")
 
-    await trading_client.close()
+    await blocking_client.close()
 if __name__ == "__main__":
     asyncio.run(main())
 

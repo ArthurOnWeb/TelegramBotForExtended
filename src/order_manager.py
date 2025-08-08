@@ -12,7 +12,7 @@ async def place_limit_order(
     post_only: bool = True,
 ):
     """
-    Place a limit order (BUY or SELL) using blocking client.
+    Place a limit order (BUY or SELL) using Perpetual client.
 
     :param client: BlockingTradingClient
     :param market: market name (ex: BTC-USD)

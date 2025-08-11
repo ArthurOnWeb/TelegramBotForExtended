@@ -11,9 +11,9 @@ async def main():
     setup_logging()
     account = TradingAccount()
     client = account.get_async_client()
-
-    await print(client.markets_info.get_markets())
-
+    
+    markets = await client.markets_info.get_markets()
+        print("📊 Markets:", markets)
     # --- Place a bracket order (CONDITIONAL + TP/SL) ---
     resp = await place_bracket_order(
         client=client,

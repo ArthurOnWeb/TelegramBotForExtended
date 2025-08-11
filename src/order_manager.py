@@ -153,8 +153,8 @@ class OrdersRawModule(BaseModule):
             "price": str(entry_price),
             "timeInForce": tif.name,  # "GTT", etc.
             "expiryEpochMillis": parent_sig["expiryEpochMillis"],
-            # "fee": parent_sig["fee"],     
-            # "nonce": parent_sig["nonce"],      
+            "fee": parent_sig["fee"],     
+            "nonce": parent_sig["nonce"],      
             "reduceOnly": reduce_only,
             "postOnly": False,
             "selfTradeProtectionLevel": "ACCOUNT",

@@ -50,13 +50,13 @@ class OrdersRawModule(BaseModule):
         }
     
     def _get_starknet_domain(self) -> StarknetDomain:
-    if self._override_domain is not None:
-        return self._override_domain
-    cfg = self._get_endpoint_config()
-    domain = getattr(cfg, "starknet_domain", None)
-    if domain is None:
-        raise X10Error("starknet_domain introuvable : récupère-le depuis PerpetualTradingClient et passe-le via override_domain.")
-    return domain
+        if self._override_domain is not None:
+            return self._override_domain
+        cfg = self._get_endpoint_config()
+        domain = getattr(cfg, "starknet_domain", None)
+        if domain is None:
+            raise X10Error("starknet_domain introuvable : récupère-le depuis PerpetualTradingClient et passe-le via override_domain.")
+        return domain
 
     async def _sign_like_limit(
         self,

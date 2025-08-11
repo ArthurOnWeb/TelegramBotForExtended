@@ -84,6 +84,8 @@ class OrdersRawModule(BaseModule):
         side: OrderSide,
         qty: Decimal,
         entry_price: Decimal,
+        tp_trigger: Decimal,
+        sl_trigger: Decimal,
         tp_price: Decimal,
         sl_price: Decimal,
         tif: TimeInForce = TimeInForce.GTT,

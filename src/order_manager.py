@@ -210,12 +210,20 @@ async def place_bracket_order(
     markets = await client.markets_info.get_markets()
     market = next(m for m in markets.data if m.name == market_name)
 
-    # 2) Module raw avec la même config/clé/API/session
+    domain = None
+    try:
+        cfg = getattr(client, "_PerpetualTradingClient__config", None)
+        if cfg:
+            domain = getattr(cfg, "starknet_domain", None)
+    except Exception:
+        domain = None
+
     stark_account = account.get_account()
     raw = OrdersRawModule(
         endpoint_config=account.get_endpoint_config(),
         api_key=stark_account.api_key,
         stark_account=stark_account,
+        override_domain=domain,
     )
 
     # 3) Send

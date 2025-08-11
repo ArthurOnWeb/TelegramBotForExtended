@@ -140,9 +140,9 @@ class OrdersRawModule(BaseModule):
         )
 
         dbg = order_obj.debugging_amounts  # montants en unités Stark (peuvent être négatifs)
-        base_amount  = abs(int(dbg.synthetic_amount))
-        quote_amount = abs(int(dbg.collateral_amount))
-        fee_amount   = abs(int(dbg.fee_amount))
+        base_amount  = int(dbg.synthetic_amount)
+        quote_amount = int(dbg.collateral_amount)
+        fee_amount   = int(dbg.fee_amount)
 
         base_seconds = int(order_obj.expiry_epoch_millis // 1000)   # expire_time (sans +14j)
         expiration_hours = math.ceil(base_seconds / 3600) + 24 * 14
@@ -175,14 +175,14 @@ class OrdersRawModule(BaseModule):
             "collateralPosition": str(int(account.vault)),
         }
 
+        print("LOCAL PARENT HASH =", hex(msg_hash), "EXP_HOURS =", expiration_hours)
+
         return {
             "settlement": settlement,
-            "fee": str(order_obj.fee),                       # doc: requis
+            "fee": str(order_obj.fee),                     
             "expiryEpochMillis": int(order_obj.expiry_epoch_millis),
-            "nonce": (str(int(order_obj.nonce)) if order_obj.nonce is not None else None),  # doc: requis
+            "nonce": (str(int(order_obj.nonce)) if order_obj.nonce is not None else None),  
             "id": (str(getattr(order_obj, "id", "")) or None),
-            # pour debug si besoin :
-            # "local_hash": hex(msg_hash),
         }
 
     async def place_bracket_order(

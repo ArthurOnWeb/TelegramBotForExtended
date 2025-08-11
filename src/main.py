@@ -5,7 +5,7 @@ from decimal import Decimal
 from x10.perpetual.orders import OrderSide
 from utils import setup_logging
 from account import TradingAccount
-from order_manager import place_bracket_order  # + tes autres imports si tu gardes limit/cancel
+from order_manager import place_bracket_order 
 
 async def main():
     setup_logging()

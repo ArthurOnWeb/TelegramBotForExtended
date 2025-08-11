@@ -144,8 +144,7 @@ class OrdersRawModule(BaseModule):
         quote_amount = abs(int(dbg.collateral_amount))
         fee_amount   = abs(int(dbg.fee_amount))
 
-        # expiration: même règle que la factory (expire_time + 14j), en SECONDES
-        expiration_seconds = math.ceil(order_obj.expiry_epoch_millis / 1000) + 14 * 24 * 3600
+        expiration_hours = math.ceil(base_seconds / 3600) + 24 * 14
 
         base_asset_id  = int(market.synthetic_asset.settlement_external_id, 16)
         quote_asset_id = int(market.collateral_asset.settlement_external_id, 16)
@@ -159,7 +158,7 @@ class OrdersRawModule(BaseModule):
             quote_amount=quote_amount,
             fee_amount=fee_amount,
             fee_asset_id=quote_asset_id,
-            expiration=expiration_seconds,
+            expiration=expiration_hours,
             salt=int(order_obj.nonce),
             user_public_key=account.public_key,
             domain_name=domain.name,

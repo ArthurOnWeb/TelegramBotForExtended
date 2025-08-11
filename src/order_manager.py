@@ -81,7 +81,7 @@ class OrdersRawModule(BaseModule):
     async def place_bracket_order(
         self,
         *,
-        market: MarketModel,                 # passe l'objet MarketModel (cf. exemple d’usage plus bas)
+        market: MarketModel,                 # passe l'objet MarketModel
         side: OrderSide,
         qty: Decimal,
         entry_price: Decimal,
@@ -124,13 +124,17 @@ class OrdersRawModule(BaseModule):
             "tpSlType": "ORDER",
             "settlement": parent_sig["settlement"],
             "takeProfit": {
+                "triggerPrice": str(tp_trigger),
+                "triggerPriceType": "LAST",
                 "price": str(tp_price),
                 "priceType": "LIMIT",
                 "settlement": tp_sig["settlement"],
             },
             "stopLoss": {
+                "triggerPrice": str(sl_trigger),
+                "triggerPriceType": "LAST",
                 "price": str(sl_price),
-                "priceType": "LIMIT",
+                "priceType": "MARKET",
                 "settlement": sl_sig["settlement"],
             },
         }
@@ -148,3 +152,41 @@ class OrdersRawModule(BaseModule):
                     err = await r.text()
                 raise X10Error(f"Order post failed ({r.status}): {err}")
             return await r.json()
+
+
+async def place_bracket_order(
+    *,
+    client,             # PerpetualTradingClient
+    account,            # TradingAccount (pour récupérer config + stark_account)
+    market_name: str,
+    quantity: Decimal,
+    entry_price: Decimal,
+    side: OrderSide,
+    tp_trigger: Decimal, tp_price: Decimal,
+    sl_trigger: Decimal, sl_price: Decimal,
+    
+) -> Dict[str, Any]:
+    # 1) MarketModel via la SDK
+    markets = await client.markets_info.get_markets()
+    market = next(m for m in markets.data if m.name == market_name)
+
+    # 2) Module raw avec la même config/clé/API/session
+    stark_account = account.get_account()
+    raw = OrdersRawModule(
+        endpoint_config=account.get_endpoint_config(),
+        api_key=stark_account.api_key,
+        stark_account=stark_account,
+    )
+
+    # 3) Envoi
+    resp = await raw.place_bracket_order(
+        market=market,
+        side=side,
+        qty=quantity,
+        entry_price=entry_price,
+        entry_trigger_price=entry_trigger,
+        tp_trigger=tp_trigger, tp_price=tp_price,
+        sl_trigger=sl_trigger, sl_price=sl_price,
+        reduce_only=True,
+    )
+    return resp

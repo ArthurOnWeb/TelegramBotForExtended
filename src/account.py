@@ -42,6 +42,9 @@ class TradingAccount:
 
     def get_account(self) -> StarkPerpetualAccount:
         return self.stark_account
+    
+    def get_endpoint_config(self) -> EndpointConfig:
+        return self.endpoint_config
 
     async def close(self) -> None:
         """Close underlying HTTP sessions for created clients."""

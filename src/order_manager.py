@@ -60,6 +60,36 @@ class OrdersRawModule(BaseModule):
             raise X10Error("starknet_domain introuvable : récupère-le depuis PerpetualTradingClient et passe-le via override_domain.")
         return domain
 
+    def debug_print_local_hash(account, market: MarketModel, order_obj, domain: StarknetDomain):
+        # Récupère les mêmes champs que la factory a utilisés
+        st = order_obj.settlement
+        dbg = order_obj.debugging_amounts  # collat/synth/fee en unités Stark
+        # ATTENTION: expiration = ceil((expire_time + 14j).timestamp()) dans create_order_object
+        # Ici, on repart de order_obj.expiry_epoch_millis (+14j déjà appliqués dans le hash),
+        # donc convertis en secondes:
+        expiration_seconds = int(order_obj.expiry_epoch_millis // 1000)
+
+        base_asset_id  = int(market.synthetic_asset.settlement_external_id, 16)
+        quote_asset_id = int(market.collateral_asset.settlement_external_id, 16)
+
+        h = get_order_msg_hash(
+            position_id=int(st.collateral_position),
+            base_asset_id=base_asset_id,
+            base_amount=int(dbg.synthetic_amount),
+            quote_asset_id=quote_asset_id,
+            quote_amount=int(dbg.collateral_amount),
+            fee_amount=int(dbg.fee_amount),
+            fee_asset_id=quote_asset_id,
+            expiration=expiration_seconds,
+            salt=int(order_obj.nonce),
+            user_public_key=int(st.stark_key),
+            domain_name=domain.name,
+            domain_version=domain.version,
+            domain_chain_id=domain.chain_id,
+            domain_revision=domain.revision,
+        )
+        print("LOCAL ORDER HASH =", hex(h))
+        
     async def _sign_like_limit(
         self,
         *,
@@ -93,7 +123,7 @@ class OrdersRawModule(BaseModule):
             expire_time=expire_time,
             nonce=nonce,
         )
-        print(debug_print_local_hash(account, market,self,domain))
+        debug_print_local_hash(account, market,self,domain)
         return {
             "settlement": _settlement_to_api_dict(order_obj),
             "fee": str(order_obj.fee),
@@ -101,36 +131,6 @@ class OrdersRawModule(BaseModule):
             "nonce": (str(int(order_obj.nonce)) if order_obj.nonce is not None else None),
             "id": (str(getattr(order_obj, "id", "")) or None),
         }
-
-    def debug_print_local_hash(account, market: MarketModel, order_obj, domain: StarknetDomain):
-        # Récupère les mêmes champs que la factory a utilisés
-        st = order_obj.settlement
-        dbg = order_obj.debugging_amounts  # collat/synth/fee en unités Stark
-        # ATTENTION: expiration = ceil((expire_time + 14j).timestamp()) dans create_order_object
-        # Ici, on repart de order_obj.expiry_epoch_millis (+14j déjà appliqués dans le hash),
-        # donc convertis en secondes:
-        expiration_seconds = int(order_obj.expiry_epoch_millis // 1000)
-
-        base_asset_id  = int(market.synthetic_asset.settlement_external_id, 16)
-        quote_asset_id = int(market.collateral_asset.settlement_external_id, 16)
-
-        h = get_order_msg_hash(
-            position_id=int(st.collateral_position),
-            base_asset_id=base_asset_id,
-            base_amount=int(dbg.synthetic_amount),
-            quote_asset_id=quote_asset_id,
-            quote_amount=int(dbg.collateral_amount),
-            fee_amount=int(dbg.fee_amount),
-            fee_asset_id=quote_asset_id,
-            expiration=expiration_seconds,
-            salt=int(order_obj.nonce),
-            user_public_key=int(st.stark_key),
-            domain_name=domain.name,
-            domain_version=domain.version,
-            domain_chain_id=domain.chain_id,
-            domain_revision=domain.revision,
-        )
-        print("LOCAL ORDER HASH =", hex(h))
 
 
     async def place_bracket_order(

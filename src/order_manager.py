@@ -163,6 +163,7 @@ class OrdersRawModule(BaseModule):
                 "triggerPriceType": "LAST",
                 "direction": direction,
                 "executionPriceType": "LIMIT",
+            },
             "tpSlType": "ORDER",
             "settlement": parent_sig["settlement"],
             "takeProfit": {

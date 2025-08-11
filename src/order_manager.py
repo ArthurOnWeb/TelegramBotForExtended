@@ -94,6 +94,7 @@ class OrdersRawModule(BaseModule):
             "fee": str(order_obj.fee),
             "expiryEpochMillis": int(order_obj.expiry_epoch_millis),
             "nonce": (str(int(order_obj.nonce)) if order_obj.nonce is not None else None),
+            "id": str(order_obj.id),
         }
 
     async def place_bracket_order(
@@ -129,6 +130,7 @@ class OrdersRawModule(BaseModule):
 
         # 2) payload final
         body: Dict[str, Any] = {
+            "id": str(order_obj.id),
             "market": market.name,
             "type": "LIMIT",
             "side": side.name,  # "BUY"/"SELL"
@@ -166,8 +168,7 @@ class OrdersRawModule(BaseModule):
         sess = await self.get_session()
         async with sess.post(url, json=body, headers=self._headers()) as r:
             if r.status >= 400:
-                text = await r.text()
-                err = text or "<empty body>"
+                err = await r.text() or "<empty body>"
                 raise X10Error(f"Order post failed ({r.status}): {err}")
             return await r.json()
 

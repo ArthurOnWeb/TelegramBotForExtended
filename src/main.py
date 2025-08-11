@@ -12,7 +12,7 @@ async def main():
     account = TradingAccount()
     client = account.get_async_client()
 
-    print(client.markets_info.get_markets())
+    await print(client.markets_info.get_markets())
 
     # --- Place a bracket order (CONDITIONAL + TP/SL) ---
     resp = await place_bracket_order(

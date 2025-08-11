@@ -7,10 +7,9 @@ from x10.perpetual.accounts import StarkPerpetualAccount
 from x10.perpetual.markets import MarketModel
 from x10.perpetual.order_object import create_order_object
 from x10.perpetual.orders import OrderSide, TimeInForce
-from x10.perpetual.trading_client import PerpetualTradingClient
-from x10.perpetual.configuration import EndpointConfig
+from x10.perpetual.trading_client.base_module import BaseModule
 from x10.utils.date import utc_now
-from x10.perpetual.base_module import BaseModule 
+ 
 
 
 def _settlement_to_api_dict(order_obj) -> Dict[str, Any]:
@@ -156,15 +155,15 @@ class OrdersRawModule(BaseModule):
 
 async def place_bracket_order(
     *,
-    client,             # PerpetualTradingClient
-    account,            # TradingAccount (pour récupérer config + stark_account)
+    client,             
+    account,           
     market_name: str,
     quantity: Decimal,
     entry_price: Decimal,
     side: OrderSide,
     tp_trigger: Decimal, tp_price: Decimal,
     sl_trigger: Decimal, sl_price: Decimal,
-    
+
 ) -> Dict[str, Any]:
     # 1) MarketModel via la SDK
     markets = await client.markets_info.get_markets()

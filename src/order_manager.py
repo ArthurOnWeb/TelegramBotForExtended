@@ -89,7 +89,7 @@ class OrdersRawModule(BaseModule):
             domain_revision=domain.revision,
         )
         print("LOCAL ORDER HASH =", hex(h))
-        
+
     async def _sign_like_limit(
         self,
         *,
@@ -123,7 +123,7 @@ class OrdersRawModule(BaseModule):
             expire_time=expire_time,
             nonce=nonce,
         )
-        debug_print_local_hash(account, market,self,domain)
+        self.debug_print_local_hash(account, market,self,domain)
         return {
             "settlement": _settlement_to_api_dict(order_obj),
             "fee": str(order_obj.fee),

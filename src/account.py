@@ -5,6 +5,7 @@ from x10.perpetual.accounts import StarkPerpetualAccount
 from x10.perpetual.trading_client import PerpetualTradingClient
 from x10.perpetual.simple_client.simple_trading_client import BlockingTradingClient
 from x10.perpetual.configuration import MAINNET_CONFIG
+from x10.perpetual.configuration import EndpointConfig
 
 load_dotenv()
 

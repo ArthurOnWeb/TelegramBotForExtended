@@ -144,6 +144,7 @@ class OrdersRawModule(BaseModule):
         quote_amount = abs(int(dbg.collateral_amount))
         fee_amount   = abs(int(dbg.fee_amount))
 
+        base_seconds = int(order_obj.expiry_epoch_millis // 1000)   # expire_time (sans +14j)
         expiration_hours = math.ceil(base_seconds / 3600) + 24 * 14
 
         base_asset_id  = int(market.synthetic_asset.settlement_external_id, 16)

@@ -37,7 +37,7 @@ async def cancel_order(client: PerpetualTradingClient, order_id: str):
     """
     Cancel an order using its ID
 
-    :param client: BlockingTradingClient
+    :param client: PerpetualTradingClient
     :param order_id: Id of the order to cancel
     """
     await client.orders.cancel_order(order_id=order_id)

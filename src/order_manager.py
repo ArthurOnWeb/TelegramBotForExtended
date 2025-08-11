@@ -50,22 +50,13 @@ class OrdersRawModule(BaseModule):
         }
     
     def _get_starknet_domain(self) -> StarknetDomain:
-        if self._override_domain is not None:
-            return self._override_domain
-
-        cfg = self._get_endpoint_config()
-        domain = getattr(cfg, "starknet_domain", None)
-        if domain is not None:
-            return domain
-
-        #FALLBACK
-        chain_id = 2 if "testnet" in cfg.signing_domain.lower() else 1
-        return StarknetDomain(
-            name=cfg.signing_domain,
-            version="1",
-            chain_id=chain_id,
-            revision=0,
-        )
+    if self._override_domain is not None:
+        return self._override_domain
+    cfg = self._get_endpoint_config()
+    domain = getattr(cfg, "starknet_domain", None)
+    if domain is None:
+        raise X10Error("starknet_domain introuvable : récupère-le depuis PerpetualTradingClient et passe-le via override_domain.")
+    return domain
 
     async def _sign_like_limit(
         self,
@@ -177,7 +168,7 @@ class OrdersRawModule(BaseModule):
                 "triggerPrice": str(sl_trigger),
                 "triggerPriceType": "LAST",
                 "price": str(sl_price),
-                "priceType": "MARKET",
+                "priceType": "LIMIT",
                 "settlement": sl_sig["settlement"],
             },
         }

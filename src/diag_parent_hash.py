@@ -2,11 +2,13 @@
 import math
 from fast_stark_crypto import get_order_msg_hash
 
+
 def _hash_with(
     *, base_asset_id:int, quote_asset_id:int, pos_id:int, pubkey:int,
     base_amt:int, quote_amt:int, fee_amt:int, expiration:int, salt:int,
-    domain
+    domain, fee_asset_use_base:bool
 ):
+    fee_asset_id = base_asset_id if fee_asset_use_base else quote_asset_id
     return get_order_msg_hash(
         position_id=pos_id,
         base_asset_id=base_asset_id,
@@ -14,7 +16,7 @@ def _hash_with(
         quote_asset_id=quote_asset_id,
         quote_amount=quote_amt,
         fee_amount=fee_amt,
-        fee_asset_id=quote_asset_id,
+        fee_asset_id=fee_asset_id,
         expiration=expiration,
         salt=salt,
         user_public_key=pubkey,

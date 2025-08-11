@@ -58,6 +58,18 @@ def build_bracket_order_model(
         self_trade_protection_level=stp,
     )
 
+    from diag_parent_hash import debug_parent_hash_variants
+
+    # après avoir créé parent_lim (LIMIT via SDK) :
+    debug_parent_hash_variants(
+        parent_limit=parent_lim,
+        market=market,
+        domain=starknet_domain,
+        account=account,
+        server_hash_hex="0x1981767faa570dbfe73b84b578f8e59d5b7bb0698070aab2d73f92660d9950a",  # colle ce que renvoie l’API
+)
+
+
     parent_id = parent_lim.id or (external_id or f"brkt-{uuid.uuid4()}")
     trig_price = entry_trigger if entry_trigger is not None else entry_price
 

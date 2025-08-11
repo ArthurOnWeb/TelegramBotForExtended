@@ -1,6 +1,7 @@
 from typing import Any, Dict, Optional
 from decimal import Decimal
 import aiohttp
+import uuid
 
 from x10.errors import X10Error
 from x10.perpetual.accounts import StarkPerpetualAccount
@@ -10,7 +11,6 @@ from x10.perpetual.order_object import create_order_object
 from x10.perpetual.orders import OrderSide, TimeInForce
 from x10.perpetual.trading_client.base_module import BaseModule
 from x10.utils.date import utc_now
- 
 
 
 def _settlement_to_api_dict(order_obj) -> Dict[str, Any]:
@@ -94,7 +94,7 @@ class OrdersRawModule(BaseModule):
             "fee": str(order_obj.fee),
             "expiryEpochMillis": int(order_obj.expiry_epoch_millis),
             "nonce": (str(int(order_obj.nonce)) if order_obj.nonce is not None else None),
-            "id": str(order_obj.id),
+            "id": (str(getattr(order_obj, "id", "")) or None),
         }
 
     async def place_bracket_order(
@@ -127,10 +127,14 @@ class OrdersRawModule(BaseModule):
         sl_sig = await self._sign_like_limit(
             account=account, market=market, qty=qty, price=sl_price, side=opposite, tif=tif
         )
+        # juste après avoir calculé parent_sig/tp_sig/sl_sig
+        parent_id = parent_sig.get("id") or f"brkt-{uuid.uuid4()}"
+        client_oid = client_order_id or parent_id
+
 
         # 2) payload final
         body: Dict[str, Any] = {
-            "id": str(order_obj.id),
+            "id": parent_id,
             "market": market.name,
             "type": "LIMIT",
             "side": side.name,  # "BUY"/"SELL"

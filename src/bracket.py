@@ -6,11 +6,12 @@ from typing import Optional
 from x10.perpetual.accounts import StarkPerpetualAccount
 from x10.perpetual.markets import MarketModel
 from x10.perpetual.order_object import create_order_object
+from x10.perpetual.configuration import StarknetDomain
 from x10.perpetual.orders import (
     OrderSide, OrderType, TimeInForce, SelfTradeProtectionLevel,
     PerpetualOrderModel, OrderTriggerPriceType, OrderTriggerDirection,
     OrderPriceType, OrderTpslType, CreateOrderConditionalTriggerModel,
-    CreateOrderTpslTriggerModel,
+    CreateOrderTpslTriggerModel,PerpetualOrderModel, StarkSettlementModel, SettlementSignatureModel
 )
 from x10.utils.date import utc_now
 
@@ -106,6 +107,15 @@ def build_bracket_order_model(
     )
     return parent
     
+# bracket_parent_conditional.py
+import math
+from decimal import Decimal
+from fast_stark_crypto import get_order_msg_hash
+from x10.perpetual.accounts import StarkPerpetualAccount
+from x10.perpetual.markets import MarketModel
+from x10.perpetual.configuration import StarknetDomain
+from x10.perpetual.orders import StarkSettlementModel, SettlementSignatureModel, PerpetualOrderModel
+
 def sign_parent_conditional_from_limit(
     *,
     parent_limit: PerpetualOrderModel,
@@ -113,24 +123,21 @@ def sign_parent_conditional_from_limit(
     market: MarketModel,
     domain: StarknetDomain,
 ) -> StarkSettlementModel:
-    """
-    Re-signe la settlement du parent pour un ordre 'CONDITIONAL':
-    - montants STARK en **valeur absolue** (comme reflété dans debugInfo serveur)
-    - expiration en **HEURES**: ceil(expiry_ms/1000/3600) + 14*24
-    - même nonce/fees/vault/pubkey que le LIMIT de référence
-    """
+    # 1) Montants STARK depuis la factory (puis en VALEUR ABS)
     dbg = parent_limit.debugging_amounts
     base_amount  = abs(int(dbg.synthetic_amount))
     quote_amount = abs(int(dbg.collateral_amount))
     fee_amount   = abs(int(dbg.fee_amount))
 
-    # expiration en HEURES (alignée au serveur)
+    # 2) Expiration en HEURES (ceil(ms->s->h) + 14 jours)
     base_seconds = int(parent_limit.expiry_epoch_millis // 1000)
     expiration_hours = math.ceil(base_seconds / 3600) + 24 * 14
 
+    # 3) Asset IDs
     base_asset_id  = int(market.synthetic_asset.settlement_external_id, 16)
     quote_asset_id = int(market.collateral_asset.settlement_external_id, 16)
 
+    # 4) Hash & signature (même domaine/nonce/clé publique/position)
     msg_hash = get_order_msg_hash(
         position_id=account.vault,
         base_asset_id=base_asset_id,
@@ -139,7 +146,7 @@ def sign_parent_conditional_from_limit(
         quote_amount=quote_amount,
         fee_amount=fee_amount,
         fee_asset_id=quote_asset_id,
-        expiration=expiration_hours,               # ⚠️ HEURES
+        expiration=expiration_hours,
         salt=int(parent_limit.nonce),
         user_public_key=account.public_key,
         domain_name=domain.name,
@@ -148,6 +155,8 @@ def sign_parent_conditional_from_limit(
         domain_revision=domain.revision,
     )
     r, s = account.sign(msg_hash)
+    # (debug)
+    print("LOCAL PARENT HASH =", hex(msg_hash), "EXP_HOURS =", expiration_hours)
 
     return StarkSettlementModel(
         signature=SettlementSignatureModel(r=r, s=s),

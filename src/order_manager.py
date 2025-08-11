@@ -166,9 +166,8 @@ class OrdersRawModule(BaseModule):
         sess = await self.get_session()
         async with sess.post(url, json=body, headers=self._headers()) as r:
             if r.status >= 400:
-                try:
-                    text = await r.text()
-                    err = text or "<empty body>"
+                text = await r.text()
+                err = text or "<empty body>"
                 raise X10Error(f"Order post failed ({r.status}): {err}")
             return await r.json()
 

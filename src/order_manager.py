@@ -108,7 +108,7 @@ class OrdersRawModule(BaseModule):
         tp_price: Decimal,
         sl_price: Decimal,
         tif: TimeInForce = TimeInForce.GTT,
-        reduce_only: bool = True,           # recommandé pour éviter d’augmenter la position
+        reduce_only: bool = False,           # recommandé pour éviter d’augmenter la position
         client_order_id: Optional[str] = None,
         nonce: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -167,9 +167,8 @@ class OrdersRawModule(BaseModule):
         async with sess.post(url, json=body, headers=self._headers()) as r:
             if r.status >= 400:
                 try:
-                    err = await r.json()
-                except aiohttp.ContentTypeError:
-                    err = await r.text()
+                    text = await r.text()
+                    err = text or "<empty body>"
                 raise X10Error(f"Order post failed ({r.status}): {err}")
             return await r.json()
 
@@ -206,6 +205,6 @@ async def place_bracket_order(
         entry_price=entry_price,
         tp_trigger=tp_trigger, tp_price=tp_price,
         sl_trigger=sl_trigger, sl_price=sl_price,
-        reduce_only=True,
+        reduce_only=False,
     )
     return resp

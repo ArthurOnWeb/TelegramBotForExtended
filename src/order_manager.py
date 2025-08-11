@@ -26,6 +26,16 @@ def _settlement_to_api_dict(order_obj) -> Dict[str, Any]:
 
 
 class OrdersRawModule(BaseModule):
+    def __init__(
+        self,
+        endpoint_config,
+        *,
+        api_key: Optional[str] = None,
+        stark_account: Optional[StarkPerpetualAccount] = None,
+        override_domain: Optional[StarknetDomain] = None,
+    ):
+        super().__init__(endpoint_config, api_key=api_key, stark_account=stark_account)
+        self._override_domain = override_domain
     """
     Poste un ordre CONDITIONNEL avec TP/SL (tpSlType=ORDER) sur /user/order,
     en réutilisant le même domaine de signature, les mêmes arrondis et la même
@@ -36,18 +46,19 @@ class OrdersRawModule(BaseModule):
         return {
             "X-Api-Key": self._get_api_key(), 
             "Content-Type": "application/json",
+            "Accept": "application/json",
         }
     
     def _get_starknet_domain(self) -> StarknetDomain:
+        if self._override_domain is not None:
+            return self._override_domain
+
         cfg = self._get_endpoint_config()
-        # 1) Si la conf expose déjà starknet_domain, on le réutilise
         domain = getattr(cfg, "starknet_domain", None)
         if domain is not None:
             return domain
 
-        # 2) Fallback: on le construit depuis signing_domain
-        # Conventions courantes : version="1", revision=0
-        # chain_id: 1 (mainnet) / 2 (testnet) – ajuste si ta plateforme utilise d’autres valeurs
+        #FALLBACK
         chain_id = 2 if "testnet" in cfg.signing_domain.lower() else 1
         return StarknetDomain(
             name=cfg.signing_domain,
@@ -100,7 +111,7 @@ class OrdersRawModule(BaseModule):
     async def place_bracket_order(
         self,
         *,
-        market: MarketModel,                 # passe l'objet MarketModel
+        market: MarketModel,      
         side: OrderSide,
         qty: Decimal,
         entry_price: Decimal,
@@ -136,17 +147,22 @@ class OrdersRawModule(BaseModule):
         body: Dict[str, Any] = {
             "id": parent_id,
             "market": market.name,
-            "type": "LIMIT",
+            "type": "CONDITIONAL",
             "side": side.name,  # "BUY"/"SELL"
             "qty": str(qty),
             "price": str(entry_price),
             "timeInForce": tif.name,  # "GTT", etc.
             "expiryEpochMillis": parent_sig["expiryEpochMillis"],
-            "fee": parent_sig["fee"],          # si l'API l'ignore, ce n'est pas bloquant
-            "nonce": parent_sig["nonce"],      # idem
+            # "fee": parent_sig["fee"],     
+            # "nonce": parent_sig["nonce"],      
             "reduceOnly": reduce_only,
             "postOnly": False,
             "selfTradeProtectionLevel": "ACCOUNT",
+            "trigger": {            
+                "triggerPrice": str(entry_price),    
+                "triggerPriceType": "LAST",
+                "direction": direction,
+                "executionPriceType": "LIMIT",
             "tpSlType": "ORDER",
             "settlement": parent_sig["settlement"],
             "takeProfit": {

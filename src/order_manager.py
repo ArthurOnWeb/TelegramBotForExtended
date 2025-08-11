@@ -123,7 +123,7 @@ class OrdersRawModule(BaseModule):
             expire_time=expire_time,
             nonce=nonce,
         )
-        self.debug_print_local_hash(account, market,self,domain)
+        self.debug_print_local_hash(account, market,domain)
         return {
             "settlement": _settlement_to_api_dict(order_obj),
             "fee": str(order_obj.fee),

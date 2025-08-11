@@ -2,6 +2,7 @@ from typing import Any, Dict, Optional
 from decimal import Decimal
 import aiohttp
 import uuid
+import math
 
 from x10.errors import X10Error
 from x10.perpetual.accounts import StarkPerpetualAccount
@@ -102,6 +103,87 @@ class OrdersRawModule(BaseModule):
             "id": (str(getattr(order_obj, "id", "")) or None),
         }
 
+    async def _sign_parent_conditional_abs(
+    self,
+    *,
+    account: StarkPerpetualAccount,
+    market: MarketModel,
+    qty: Decimal,
+    price: Decimal,
+    side: OrderSide,
+    tif: TimeInForce = TimeInForce.GTT,
+    expire_time=None,
+    nonce: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Pour le PARENT 'CONDITIONAL' uniquement :
+    - on utilise la factory pour garder les mêmes arrondis/fee/nonce/expiry
+    - mais on signe avec les VALEURS ABSOLUES (base/quote/fee), comme le serveur le reflète dans debugInfo.
+    """
+    if expire_time is None:
+        expire_time = utc_now()
+
+    domain = self._get_starknet_domain()
+
+    # 1) fabriquer l'ordre limit-like (récupération des montants/fee/expiry/nonce)
+    order_obj = create_order_object(
+        account=account,
+        market=market,
+        amount_of_synthetic=qty,
+        price=price,
+        side=side,
+        starknet_domain=domain,
+        post_only=False,
+        time_in_force=tif,
+        expire_time=expire_time,
+        nonce=nonce,
+    )
+
+    dbg = order_obj.debugging_amounts  # montants en unités Stark (peuvent être négatifs)
+    base_amount  = abs(int(dbg.synthetic_amount))
+    quote_amount = abs(int(dbg.collateral_amount))
+    fee_amount   = abs(int(dbg.fee_amount))
+
+    # expiration: même règle que la factory (expire_time + 14j), en SECONDES
+    expiration_seconds = math.ceil(order_obj.expiry_epoch_millis / 1000) + 14 * 24 * 3600
+
+    base_asset_id  = int(market.synthetic_asset.settlement_external_id, 16)
+    quote_asset_id = int(market.collateral_asset.settlement_external_id, 16)
+
+    # 2) hash + signature (domain idem que place_order)
+    msg_hash = get_order_msg_hash(
+        position_id=account.vault,
+        base_asset_id=base_asset_id,
+        base_amount=base_amount,
+        quote_asset_id=quote_asset_id,
+        quote_amount=quote_amount,
+        fee_amount=fee_amount,
+        fee_asset_id=quote_asset_id,
+        expiration=expiration_seconds,
+        salt=int(order_obj.nonce),
+        user_public_key=account.public_key,
+        domain_name=domain.name,
+        domain_version=domain.version,
+        domain_chain_id=domain.chain_id,
+        domain_revision=domain.revision,
+    )
+    r, s = account.sign(msg_hash)
+
+    settlement = {
+        "signature": {"r": hex(int(r)), "s": hex(int(s))},
+        "starkKey": hex(int(account.public_key)),
+        "collateralPosition": str(int(account.vault)),
+    }
+
+    return {
+        "settlement": settlement,
+        "fee": str(order_obj.fee),                       # doc: requis
+        "expiryEpochMillis": int(order_obj.expiry_epoch_millis),
+        "nonce": (str(int(order_obj.nonce)) if order_obj.nonce is not None else None),  # doc: requis
+        "id": (str(getattr(order_obj, "id", "")) or None),
+        # pour debug si besoin :
+        # "local_hash": hex(msg_hash),
+    }
 
     async def place_bracket_order(
         self,
@@ -124,8 +206,8 @@ class OrdersRawModule(BaseModule):
         direction = "UP" if side == OrderSide.BUY else "DOWN"
 
         # 1) signatures LIMIT-like (parent/TP/SL)
-        parent_sig = await self._sign_like_limit(
-            account=account, market=market, qty=qty, price=entry_price, side=side, tif=tif, nonce=nonce
+        parent_sig = await self._sign_parent_conditional_abs(
+        account=account, market=market, qty=qty, price=entry_price, side=side, tif=tif, nonce=nonce
         )
         tp_sig = await self._sign_like_limit(
             account=account, market=market, qty=qty, price=tp_price, side=opposite, tif=tif

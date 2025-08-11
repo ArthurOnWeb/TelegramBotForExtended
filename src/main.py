@@ -5,7 +5,7 @@ from decimal import Decimal
 from x10.errors import X10Error
 from x10.perpetual.orders import OrderSide
 from account import TradingAccount
-from bracket_sdk import build_bracket_order_model
+from bracket import build_bracket_order_model
 
 async def main():
     acc = TradingAccount()

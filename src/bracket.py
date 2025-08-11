@@ -58,7 +58,7 @@ def build_bracket_order_model(
         self_trade_protection_level=stp,
     )
 
-    from diag_parent_hash import debug_parent_hash_variants
+    from diag_parent_hash import debug_parent_hash
 
     # après avoir créé parent_lim (LIMIT via SDK) :
     debug_parent_hash_variants(

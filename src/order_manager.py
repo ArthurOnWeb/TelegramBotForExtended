@@ -177,13 +177,12 @@ async def place_bracket_order(
         stark_account=stark_account,
     )
 
-    # 3) Envoi
+    # 3) Send
     resp = await raw.place_bracket_order(
         market=market,
         side=side,
         qty=quantity,
         entry_price=entry_price,
-        entry_trigger_price=entry_trigger,
         tp_trigger=tp_trigger, tp_price=tp_price,
         sl_trigger=sl_trigger, sl_price=sl_price,
         reduce_only=True,

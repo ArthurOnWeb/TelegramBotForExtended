@@ -4,6 +4,7 @@ import aiohttp
 
 from x10.errors import X10Error
 from x10.perpetual.accounts import StarkPerpetualAccount
+from x10.perpetual.configuration import StarknetDomain
 from x10.perpetual.markets import MarketModel
 from x10.perpetual.order_object import create_order_object
 from x10.perpetual.orders import OrderSide, TimeInForce
@@ -37,8 +38,16 @@ class OrdersRawModule(BaseModule):
             "Content-Type": "application/json",
         }
     
-    def _get_starknet_domain(self):
+    def _get_starknet_domain(self) -> StarknetDomain:
         cfg = self._get_endpoint_config()
+        # 1) Si la conf expose déjà starknet_domain, on le réutilise
+        domain = getattr(cfg, "starknet_domain", None)
+        if domain is not None:
+            return domain
+
+        # 2) Fallback: on le construit depuis signing_domain
+        # Conventions courantes : version="1", revision=0
+        # chain_id: 1 (mainnet) / 2 (testnet) – ajuste si ta plateforme utilise d’autres valeurs
         chain_id = 2 if "testnet" in cfg.signing_domain.lower() else 1
         return StarknetDomain(
             name=cfg.signing_domain,

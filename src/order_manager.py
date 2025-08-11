@@ -37,7 +37,7 @@ class OrdersRawModule(BaseModule):
             "Content-Type": "application/json",
         }
     
-    def _get_starknet_domain(self) -> StarknetDomain:
+    def _get_starknet_domain(self):
         cfg = self._get_endpoint_config()
         chain_id = 2 if "testnet" in cfg.signing_domain.lower() else 1
         return StarknetDomain(

@@ -14,7 +14,7 @@ async def place_limit_order(
     """
     Place a limit order (BUY or SELL) using Perpetual client.
 
-    :param client: BlockingTradingClient
+    :param client: PerpetualTradingClient
     :param market: market name (ex: BTC-USD)
     :param quantity: size of the order
     :param price: limit price

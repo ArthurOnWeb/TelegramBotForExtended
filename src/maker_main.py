@@ -12,13 +12,15 @@ from x10.perpetual.orderbook import OrderBook
 from x10.perpetual.orders import OrderSide
 from x10.perpetual.simple_client.simple_trading_client import BlockingTradingClient
 
-from account import TradingAccount  # <-- ta classe existante
+from account import TradingAccount 
+from rate_limit import build_rate_limiter
+from backoff_utils import call_with_retries
 
 
 # --- Paramètres de prod (surcouchables par variables d'env) ---
 MARKET_NAME = os.getenv("MM_MARKET", "BTC-USD")
-LEVELS_PER_SIDE = int(os.getenv("MM_LEVELS", "3"))        # nombre de quotes par côté
-TARGET_ORDER_USD = Decimal(os.getenv("MM_TARGET_USD", "50"))
+LEVELS_PER_SIDE = int(os.getenv("MM_LEVELS", "2"))        # nombre de quotes par côté
+TARGET_ORDER_USD = Decimal(os.getenv("MM_TARGET_USD", "250"))
 # Ecart relatif au meilleur prix : formule : best * (1 +/- (1+idx)/DIVISOR)
 OFFSET_DIVISOR = Decimal(os.getenv("MM_OFFSET_DIVISOR", "400"))
 # Limite d'envois concurrents (throttle)
@@ -37,6 +39,7 @@ class MarketMaker:
         self.market_name = market_name
         self.client: BlockingTradingClient = account.get_blocking_client()
         self._endpoint_config = account.endpoint_config
+        self._limiter = build_rate_limiter()
 
         self._buy_slots: List[Slot] = [Slot(None, None) for _ in range(LEVELS_PER_SIDE)]
         self._sell_slots: List[Slot] = [Slot(None, None) for _ in range(LEVELS_PER_SIDE)]
@@ -56,7 +59,11 @@ class MarketMaker:
         self._market = markets[self.market_name]
 
         # (optionnel) Clean ciblé au démarrage
-        await self.client.mass_cancel(markets=[self._market.name])
+
+        await call_with_retries(
+            lambda: self.client.mass_cancel(markets=[self._market.name]),
+            limiter=self._limiter,
+        )
 
         # OrderBook (callbacks → on schedule des updates)
         self._order_book = await OrderBook.create(
@@ -75,7 +82,8 @@ class MarketMaker:
         self._closing.set()
         # Optionnel : cancel quotes à l’arrêt (à toi de décider)
         try:
-            await self.client.mass_cancel(markets=[self._market.name])
+            await call_with_retries(lambda: self.client.mass_cancel(markets=[self._market.name]),
+                                    limiter=self._limiter)
         except Exception:
             pass
         if self._order_book:
@@ -153,20 +161,20 @@ class MarketMaker:
 
         try:
             async with self._throttle:
-                resp = await self.client.create_and_place_order(
-                    market_name=self._market.name,
-                    amount_of_synthetic=synthetic_amount,
-                    price=adjusted_price,
-                    side=side,
-                    post_only=True,
-                    previous_order_external_id=slot.external_id,  # replace si existant
-                    external_id=new_external_id,
+                resp = await call_with_retries(
+                    lambda: self.client.create_and_place_order(
+                        market_name=self._market.name,
+                        amount_of_synthetic=synthetic_amount,
+                        price=adjusted_price,
+                        side=side,
+                        post_only=True,
+                        previous_order_external_id=slot.external_id,
+                        external_id=new_external_id,
+                    ),
+                    limiter=self._limiter,
                 )
-            # Si OK, on remplace le slot
             slots[idx] = Slot(external_id=new_external_id, price=adjusted_price)
-
         except Exception:
-            # Log minimal pour prod (tu peux brancher sur un logger)
             print("Place/replace failed:\n", traceback.format_exc())
 
 # ----------------- runner -----------------
@@ -196,7 +204,6 @@ async def main():
     finally:
         await maker.stop()
         print("[maker] stopped.")
-
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -27,7 +27,7 @@ async def setup_and_run():
     client = await BlockingTradingClient.create(endpoint_config=MAINNET_CONFIG, account=stark_account)
 
     placed_order = await client.create_and_place_order(
-        amount_of_synthetic=Decimal("1"),
+        amount_of_synthetic=Decimal("0.001"),
         price=Decimal("62133.6"),
         market_name="BTC-USD",
         side=OrderSide.BUY,

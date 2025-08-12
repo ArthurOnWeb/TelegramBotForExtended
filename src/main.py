@@ -19,10 +19,26 @@ async def main():
     order = await place_limit_order(
         client=client,
         market="BTC-USD",
-        quantity=Decimal("0.01"),
-        price=Decimal("70000"),
+        quantity=Decimal("0.001"),
+        price=Decimal("125000"),
         side=OrderSide.BUY,
+        post-only=false
     )
+    order = await place_limit_order(
+        client=client,
+        market="BTC-USD",
+        quantity=Decimal("0.001"),
+        price=Decimal("125000"),
+        side=OrderSide.sell,
+    )
+    order = await place_limit_order(
+        client=client,
+        market="BTC-USD",
+        quantity=Decimal("0.001"),
+        price=Decimal("111111"),
+        side=OrderSide.sell,
+    )
+
 
     # 2. Cancel the order
     await cancel_order(client, order_id=order.data.id)

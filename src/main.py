@@ -9,6 +9,7 @@ from utils import setup_logging
 from account import TradingAccount
 
 from order_manager import place_limit_order,cancel_order
+import dotenv
 dotenv.load_dotenv()
 async def main():
     setup_logging()

@@ -23,9 +23,10 @@ async def main():
         price=Decimal("70000"),
         side=OrderSide.BUY,
     )
+    print(order)
 
     # 2. Cancel the order
-    await cancel_order(client, order_id=order.data.id)
+    await cancel_order(client, order_id=order.id)
     
 if __name__ == "__main__":
     asyncio.run(main())

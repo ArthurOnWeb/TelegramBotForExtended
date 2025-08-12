@@ -13,7 +13,7 @@ from order_manager import place_limit_order,cancel_order
 async def main():
     setup_logging()
     account = TradingAccount()
-    client = account.get_async_client()
+    client = account.get_blocking_client()
 
     # 1. Create a limit BUY order
     order = await place_limit_order(

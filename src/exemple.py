@@ -1,5 +1,4 @@
 from x10.perpetual.accounts import StarkPerpetualAccount
-from x10.perpetual.configuration import MAINNET_CONFIG
 from x10.perpetual.orders import OrderSide
 from x10.perpetual.trading_client import PerpetualTradingClient
 from account import

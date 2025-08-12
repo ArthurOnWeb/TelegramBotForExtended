@@ -19,22 +19,22 @@ async def main():
     order = await place_limit_order(
         client=client,
         market="BTC-USD",
-        quantity=Decimal("0.001"),
-        price=Decimal("125000"),
+        quantity=Decimal("0.002"),
+        price=Decimal("120000"),
         side=OrderSide.BUY,
         post_only=False
     )
     order = await place_limit_order(
         client=client,
         market="BTC-USD",
-        quantity=Decimal("0.001"),
+        quantity=Decimal("0.002"),
         price=Decimal("125000"),
         side=OrderSide.sell,
     )
     order = await place_limit_order(
         client=client,
         market="BTC-USD",
-        quantity=Decimal("0.001"),
+        quantity=Decimal("0.002"),
         price=Decimal("111111"),
         side=OrderSide.sell,
     )

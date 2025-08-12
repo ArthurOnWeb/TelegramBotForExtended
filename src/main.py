@@ -9,12 +9,11 @@ from utils import setup_logging
 from account import TradingAccount
 
 from order_manager import place_limit_order,cancel_order
-import dotenv
-dotenv.load_dotenv()
+
 async def main():
     setup_logging()
     account = TradingAccount()
-    client = account.get_blocking_client()
+    client = account.get_async_client()
 
     # 1. Create a limit BUY order
     order = await place_limit_order(
@@ -24,10 +23,9 @@ async def main():
         price=Decimal("70000"),
         side=OrderSide.BUY,
     )
-    print(order)
 
     # 2. Cancel the order
-    await cancel_order(client, order_id=order.id)
+    await cancel_order(client, order_id=order.data.id)
     
 if __name__ == "__main__":
     asyncio.run(main())

@@ -1,11 +1,10 @@
-# order_manager.py
+
 from decimal import Decimal
 from x10.perpetual.orders import OrderSide
-from x10.perpetual.simple_client.simple_trading_client import BlockingTradingClient
-
+from x10.perpetual.trading_client import PerpetualTradingClient
 
 async def place_limit_order(
-    client: BlockingTradingClient,
+    client: PerpetualTradingClient,
     market: str,
     quantity: Decimal,
     price: Decimal,
@@ -15,7 +14,7 @@ async def place_limit_order(
     """
     Place a limit order (BUY or SELL) using blocking client.
 
-    :param client: BlockingTradingClient
+    :param client: PerpetualTradingClient
     :param market: market name (ex: BTC-USD)
     :param quantity: size of the order
     :param price: limit price
@@ -23,23 +22,23 @@ async def place_limit_order(
     :param post_only: True = maker only
     :return: object of the placed order
     """
-    placed_order = await client.create_and_place_order(
+    placed_order = await client.place_order(
         market_name=market,
         amount_of_synthetic=quantity,
         price=price,
         side=side,
         post_only=post_only,
     )
-    print(f"✅ Order {side.name} placed at {price} on {market} (id: {placed_order.id})")
+    print(f"✅ Order {side.name} placed at {price} on {market} (id: {placed_order.data.id})")
     return placed_order
 
 
-async def cancel_order(client: BlockingTradingClient, order_id: str):
+async def cancel_order(client: PerpetualTradingClient, order_id: str):
     """
     Cancel an order using its ID
 
-    :param client: BlockingTradingClient
+    :param client: PerpetualTradingClient
     :param order_id: Id of the order to cancel
     """
-    await client.cancel_order(order_id=order_id)
+    await client.orders.cancel_order(order_id=order_id)
     print(f"❌ Order {order_id} canceled")

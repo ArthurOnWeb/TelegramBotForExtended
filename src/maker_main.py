@@ -18,7 +18,7 @@ from backoff_utils import call_with_retries
 
 
 # --- Paramètres de prod (surcouchables par variables d'env) ---
-MARKET_NAME = os.getenv("MM_MARKET", "BTC-USD")
+MARKET_NAME = input("Market ?")
 LEVELS_PER_SIDE = int(os.getenv("MM_LEVELS", "2"))        # nombre de quotes par côté
 TARGET_ORDER_USD = Decimal(os.getenv("MM_TARGET_USD", "250"))
 # Ecart relatif au meilleur prix : formule : best * (1 +/- (1+idx)/DIVISOR)

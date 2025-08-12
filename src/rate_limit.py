@@ -32,6 +32,6 @@ def build_rate_limiter():
     # If you’ve got MM rate-limit, set MM_MARKET_MAKER=1
     is_mm = os.getenv("MM_MARKET_MAKER", "0") == "1"
     # Default “safe” profiles (override with env if you want)
-    rps = _env_int("MM_RATE_LIMIT_RPS", 200 if is_mm else 5)
+    rps = _env_int("MM_RATE_LIMIT_RPS", 200 if is_mm else 8)
     burst = _env_int("MM_RATE_LIMIT_BURST", rps * 2)  # small burst cushion
     return TokenBucket(capacity=burst, refill_per_sec=float(rps))

@@ -22,7 +22,7 @@ async def main():
         quantity=Decimal("0.001"),
         price=Decimal("125000"),
         side=OrderSide.BUY,
-        post_only=false
+        post_only=False
     )
     order = await place_limit_order(
         client=client,

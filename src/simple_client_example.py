@@ -11,7 +11,7 @@ from x10.perpetual.simple_client.simple_trading_client import BlockingTradingCli
 
 
 async def setup_and_run():
-    load_dotenv()
+    dotenv.load_dotenv()
     api_key = os.getenv("API_KEY")
     public_key = os.getenv("PUBLIC_KEY")
     private_key = os.getenv("PRIVATE_KEY")

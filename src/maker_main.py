@@ -12,9 +12,10 @@ from x10.perpetual.orderbook import OrderBook
 from x10.perpetual.orders import OrderSide
 from x10.perpetual.simple_client.simple_trading_client import BlockingTradingClient
 
-from account import TradingAccount 
+from account import TradingAccount
 from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
+from utils import setup_logging, logger
 
 
 # --- Paramètres de prod (surcouchables par variables d'env) ---
@@ -210,7 +211,7 @@ class MarketMaker:
                 await self.reconcile()
             except Exception as e:
                 # keep going; log if you have a logger
-                print(f"[reconcile] error: {e}")
+                logger.error("[reconcile] error: %s", e)
             await asyncio.sleep(interval_sec)
 
     # ----------------- CORE PLACEMENT LOGIC -----------------
@@ -295,12 +296,12 @@ class MarketMaker:
                     slots[idx] = Slot(external_id=new_external_id, price=adjusted_price)
                     return
                 except Exception as e2:
-                    print("Fresh create failed:\n", traceback.format_exc())
+                    logger.error("Fresh create failed:\n%s", traceback.format_exc())
                     # Clear the slot so next tick won’t keep trying to replace a ghost
                     slots[idx] = Slot(external_id=None, price=None)
                 return
             else:
-                print("Place/replace failed:\n", traceback.format_exc())
+                logger.error("Place/replace failed:\n%s", traceback.format_exc())
                 # If we failed *and* we tried to replace a non-existent order,
                 # don’t keep the stale external_id around:
                 if slot.external_id:
@@ -323,7 +324,7 @@ async def main():
             pass
 
     await maker.start()
-    print(f"[maker] started on {MARKET_NAME}")
+    logger.info("[maker] started on %s", MARKET_NAME)
 
     # Idle loop tant qu’on n’a pas demandé l’arrêt
     try:
@@ -331,7 +332,8 @@ async def main():
             await asyncio.sleep(1.0)
     finally:
         await maker.stop()
-        print("[maker] stopped.")
+        logger.info("[maker] stopped.")
 
 if __name__ == "__main__":
+    setup_logging()
     asyncio.run(main())

@@ -6,7 +6,7 @@ import signal
 import traceback
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
-from typing import Optional, Tuple, List
+from typing import Optional, List
 
 from x10.perpetual.orderbook import OrderBook
 from x10.perpetual.orders import OrderSide
@@ -18,7 +18,7 @@ from backoff_utils import call_with_retries
 
 
 # --- Paramètres de prod (surcouchables par variables d'env) ---
-MARKET_NAME = input("Market ?")
+MARKET_NAME = os.getenv("MM_MARKET") or input("Market ? ")
 LEVELS_PER_SIDE = int(os.getenv("MM_LEVELS", "2"))        # nombre de quotes par côté
 TARGET_ORDER_USD = Decimal(os.getenv("MM_TARGET_USD", "250"))
 # Ecart relatif au meilleur prix : formule : best * (1 +/- (1+idx)/DIVISOR)
@@ -46,6 +46,7 @@ class MarketMaker:
         self._pending_buy_job: Optional[asyncio.Future] = None
         self._pending_sell_job: Optional[asyncio.Future] = None
         self._throttle = asyncio.Semaphore(MAX_IN_FLIGHT)
+        self._reconcile_task: asyncio.Task | None = None
 
         self._order_book: Optional[OrderBook] = None
         self._market = None
@@ -78,6 +79,8 @@ class MarketMaker:
             ),
         )
 
+        self._reconcile_task = asyncio.create_task(self._reconciler_loop(15.0))
+
     async def stop(self):
         self._closing.set()
         # Optionnel : cancel quotes à l’arrêt (à toi de décider)
@@ -86,9 +89,39 @@ class MarketMaker:
                                     limiter=self._limiter)
         except Exception:
             pass
+
+        if self._reconcile_task:
+            self._reconcile_task.cancel()
+            try:
+                await self._reconcile_task
+            except asyncio.CancelledError:
+                pass
+
         if self._order_book:
             await self._order_book.close()
         await self.account.close()
+
+    MM_PREFIX = "mm_"
+
+    def _all_slots(self):
+        return self._buy_slots + self._sell_slots
+
+    async def _safe_cancel(self, *, order_id: Optional[int] = None, external_id: Optional[str] = None):
+        async def _op():
+            # BlockingTradingClient supports both signatures in SDK versions;
+            # prefer external_id when present.
+            if external_id is not None:
+                return await self.client.cancel_order(order_external_id=external_id)
+            return await self.client.cancel_order(order_id=order_id)
+
+        try:
+            await call_with_retries(_op, limiter=self._limiter)
+        except Exception as e:
+            s = str(e)
+            # Treat “not found” as already gone
+            if "Edit order not found" in s or '"code":1142' in s or "not found" in s.lower():
+                return
+            raise
 
     # ----------------- UPDATE LOOPS (callbacks) -----------------
 
@@ -119,6 +152,67 @@ class MarketMaker:
                                                return_exceptions=True)
         await self._pending_buy_job
 
+    @staticmethod
+    def _is_edit_not_found(e: Exception) -> bool:
+        s = str(e)
+        return "Edit order not found" in s or '"code":1142' in s or "code\": 1142" in s
+
+    async def reconcile(self):
+        """
+        Periodically reconcile local slots with server state.
+        - clears local ghosts
+        - cancels server orphans
+        """
+        if not self._market:
+            return
+
+        # 1) Fetch open orders from server for this market
+        # Prefer the async trading client’s account module if your Blocking client
+        # doesn’t expose get_open_orders. If yours does, feel free to use it directly.
+        async_client = self.account.get_async_client()
+        resp = await call_with_retries(
+            lambda: async_client.account.get_open_orders(market_names=[self._market.name]),
+            limiter=self._limiter,
+        )
+        open_orders = resp.data or []
+
+        # 2) Keep only our MM orders
+        server_mm = {o.external_id: o for o in open_orders if (o.external_id or "").startswith(self.MM_PREFIX)}
+
+        # 3) Local ghosts -> clear slot
+        for slots in (self._buy_slots, self._sell_slots):
+            for i, slot in enumerate(slots):
+                if not slot.external_id:
+                    continue
+                if slot.external_id not in server_mm:
+                    # order disappeared (filled/cancelled/rejected); free the slot
+                    slots[i] = Slot(None, None)
+
+        # 4) Server orphans -> cancel
+        local_exts = {s.external_id for s in self._all_slots() if s.external_id}
+        orphans = [o for ext, o in server_mm.items() if ext not in local_exts]
+        for o in orphans:
+            await self._safe_cancel(order_id=o.id, external_id=o.external_id)
+
+        # 5) (Optional) Drift check: if slot price ≠ server price, clear to force re-quote
+        #    (edits are already happening in your _ensure_slot; this just prevents stale state)
+        ext_to_slot = {s.external_id: s for s in self._all_slots() if s.external_id}
+        for ext, o in server_mm.items():
+            s = ext_to_slot.get(ext)
+            if s and s.price is not None and o.price != s.price:
+                # let the next best bid/ask callback re-place
+                s.external_id = None
+                s.price = None
+
+    async def _reconciler_loop(self, interval_sec: float = 15.0):
+        while not self._closing.is_set():
+            try:
+                await self.reconcile()
+            except Exception as e:
+                # keep going; log if you have a logger
+                print(f"[reconcile] error: {e}")
+            await asyncio.sleep(interval_sec)
+
     # ----------------- CORE PLACEMENT LOGIC -----------------
 
     async def _ensure_slot(self, *, side: OrderSide, idx: int, best_px: Optional[Decimal]):
@@ -126,11 +220,12 @@ class MarketMaker:
         Calcule un prix ajusté par rapport au best bid/ask,
         arrondit au tick, et fait un replace si nécessaire.
         """
+        
+        if self._closing.is_set() or best_px is None:
+            return
+
         slots = self._sell_slots if side == OrderSide.SELL else self._buy_slots
         slot = slots[idx]
-
-        if best_px is None:
-            return
 
         # Ecart relatif (ex: pour idx=0 → 1/DIV, idx=1 → 2/DIV, etc.)
         rel = (Decimal(1) + Decimal(idx)) / OFFSET_DIVISOR
@@ -157,11 +252,11 @@ class MarketMaker:
             return
 
         # Nouveau external_id (remplacement via previous_order_external_id)
-        new_external_id = f"mm_{side.name.lower()}_{idx}_{random.randint(1, 10**18)}"
+        new_external_id = f"{self.MM_PREFIX}{side.name.lower()}_{idx}_{random.randint(1, 10**18)}"
 
         try:
             async with self._throttle:
-                resp = await call_with_retries(
+                await call_with_retries(
                     lambda: self.client.create_and_place_order(
                         market_name=self._market.name,
                         amount_of_synthetic=synthetic_amount,
@@ -173,10 +268,43 @@ class MarketMaker:
                     ),
                     limiter=self._limiter,
                 )
-            slots[idx] = Slot(external_id=new_external_id, price=adjusted_price)
-        except Exception:
-            print("Place/replace failed:\n", traceback.format_exc())
 
+            # ✅ success → update slot
+            slots[idx] = Slot(external_id=new_external_id, price=adjusted_price)
+
+        except Exception as e:
+            # Workaround SDK bug – don’t let this crash the loop
+            if isinstance(e, RuntimeError) and "Lock is not acquired" in str(e):
+                # treat as failed attempt, fall-through to maybe fresh create
+                pass
+            elif self._is_edit_not_found(e):
+                # 1142 → fresh create (no previous_order_external_id)
+                try:
+                    async with self._throttle:
+                        async def _fresh():
+                            return await self.client.create_and_place_order(
+                                market_name=self._market.name,
+                                amount_of_synthetic=synthetic_amount,
+                                price=adjusted_price,
+                                side=side,
+                                post_only=True,
+                                previous_order_external_id=None,     # ← important
+                                external_id=new_external_id,
+                            )
+                    resp = await call_with_retries(_fresh, limiter=self._limiter)
+                    slots[idx] = Slot(external_id=new_external_id, price=adjusted_price)
+                    return
+                except Exception as e2:
+                    print("Fresh create failed:\n", traceback.format_exc())
+                    # Clear the slot so next tick won’t keep trying to replace a ghost
+                    slots[idx] = Slot(external_id=None, price=None)
+                return
+            else:
+                print("Place/replace failed:\n", traceback.format_exc())
+                # If we failed *and* we tried to replace a non-existent order,
+                # don’t keep the stale external_id around:
+                if slot.external_id:
+                    slots[idx] = Slot(external_id=None, price=None)
 # ----------------- runner -----------------
 
 

@@ -1,0 +1,2 @@
+x10-python-trading-starknet==0.4.5
+python-dotenv==1.0.1

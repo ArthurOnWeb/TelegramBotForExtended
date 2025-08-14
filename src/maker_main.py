@@ -49,6 +49,7 @@ class MarketMaker:
         self._pending_sell_job: Optional[asyncio.Future] = None
         self._throttle = asyncio.Semaphore(MAX_IN_FLIGHT)
         self._reconcile_task: asyncio.Task | None = None
+        self._refresh_task: asyncio.Task | None = None
 
         self._order_book: Optional[OrderBook] = None
         self._market = None
@@ -57,6 +58,19 @@ class MarketMaker:
         # Position cache for exposure calculations
         self._pos_cache: tuple[Decimal, float] = (Decimal(0), 0.0)  # (size, timestamp)
         self._pos_ttl = 2.0  # seconds
+
+    async def _create_order_book(self) -> OrderBook:
+        return await OrderBook.create(
+            self._endpoint_config,
+            market_name=self._market.name,
+            start=True,
+            best_ask_change_callback=lambda ask: asyncio.create_task(
+                self._update_sell_orders(ask.price if ask else None)
+            ),
+            best_bid_change_callback=lambda bid: asyncio.create_task(
+                self._update_buy_orders(bid.price if bid else None)
+            ),
+        )
 
     async def start(self):
         # Récupère infos marché une fois
@@ -73,19 +87,10 @@ class MarketMaker:
         )
 
         # OrderBook (callbacks → on schedule des updates)
-        self._order_book = await OrderBook.create(
-            self._endpoint_config,
-            market_name=self._market.name,
-            start=True,
-            best_ask_change_callback=lambda ask: asyncio.create_task(
-                self._update_sell_orders(ask.price if ask else None)
-            ),
-            best_bid_change_callback=lambda bid: asyncio.create_task(
-                self._update_buy_orders(bid.price if bid else None)
-            ),
-        )
+        self._order_book = await self._create_order_book()
 
         self._reconcile_task = asyncio.create_task(self._reconciler_loop(15.0))
+        self._refresh_task = asyncio.create_task(self._hard_refresh_loop(600.0))
 
     async def stop(self):
         self._closing.set()
@@ -100,6 +105,12 @@ class MarketMaker:
             self._reconcile_task.cancel()
             try:
                 await self._reconcile_task
+            except asyncio.CancelledError:
+                pass
+        if self._refresh_task:
+            self._refresh_task.cancel()
+            try:
+                await self._refresh_task
             except asyncio.CancelledError:
                 pass
 
@@ -256,6 +267,38 @@ class MarketMaker:
                 print(f"[reconcile] error: {e}")
             await asyncio.sleep(interval_sec)
 
+    async def hard_refresh(self):
+        """Cancel all orders and reopen the order book."""
+        if self._closing.is_set() or not self._market:
+            return
+        try:
+            await call_with_retries(
+                lambda: self.client.mass_cancel(markets=[self._market.name]),
+                limiter=self._limiter,
+            )
+        except Exception:
+            pass
+
+        for slots in (self._buy_slots, self._sell_slots):
+            for i in range(len(slots)):
+                slots[i] = Slot(None, None)
+        self._pending_buy_job = None
+        self._pending_sell_job = None
+
+        if self._order_book:
+            await self._order_book.close()
+        self._order_book = await self._create_order_book()
+
+    async def _hard_refresh_loop(self, interval_sec: float = 600.0):
+        while not self._closing.is_set():
+            await asyncio.sleep(interval_sec)
+            if self._closing.is_set():
+                break
+            try:
+                await self.hard_refresh()
+            except Exception as e:
+                print(f"[hard_refresh] error: {e}")
+
     # ----------------- CORE PLACEMENT LOGIC -----------------
 
     async def _ensure_slot(self, *, side: OrderSide, idx: int, best_px: Optional[Decimal]):
@@ -380,3 +423,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

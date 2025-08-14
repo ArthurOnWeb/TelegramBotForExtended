@@ -124,10 +124,15 @@ class MarketMaker:
             raise
 
     @staticmethod
-    def infer_tick(cfg, px: Decimal) -> Decimal:
-        prec = getattr(cfg, "price_precision", 2)
-        step = Decimal(1).scaleb(-prec)  # 10^-precision
-        return step
+    def get_tick(cfg) -> Decimal:
+        tick=Decimal(str(getattr(cfg, "min_price_change", "0.001")))
+        if tick!=None:
+            return tick
+        else:
+            prec = getattr(cfg, "price_precision", 2)
+            step = Decimal(1).scaleb(-prec)  # 10^-precision
+            return step
+        return 
 
     # ----------------- UPDATE LOOPS (callbacks) -----------------
 
@@ -234,16 +239,14 @@ class MarketMaker:
         slot = slots[idx]
 
         # offset in ticks based on idx
-        tick = self.infer_tick(self._market.trading_config, best_px)
+        tick = self.get_tick(self._market.trading_config)
         rel = (Decimal(1) + Decimal(idx)) / OFFSET_DIVISOR
-        delta_ticks = max(1, int((rel) * (best_px / tick)))
-
-        if side == OrderSide.SELL:
-            target = best_px + delta_ticks * tick
-            adjusted_price = (target / tick).to_integral_value(rounding=ROUND_CEILING) * tick
-        else:
-            target = best_px - delta_ticks * tick
-            adjusted_price = (target / tick).to_integral_value(rounding=ROUND_FLOOR) * tick
+        direction = Decimal(1 if side == OrderSide.SELL else -1)
+        candidate = best_px * (Decimal(1) + direction * rel)
+        
+        adjusted_price = candidate.quantize(
+        tick, rounding=(ROUND_CEILING if side == OrderSide.SELL else ROUND_FLOOR)
+        )
 
         # Même prix → rien à faire
         if slot.external_id and slot.price == adjusted_price:

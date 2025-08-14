@@ -235,6 +235,15 @@ class MarketMaker:
         # Arrondi au tick selon le côté
         rounding = ROUND_CEILING if side == OrderSide.SELL else ROUND_FLOOR
         adjusted_price = self._market.trading_config.round_price(candidate, rounding)
+        cfg = self._market.trading_config
+        print(
+            f"[{self.market_name}] side={side.name} idx={idx} "
+            f"best_px={best_px} rel={(Decimal(1)+Decimal(idx))/OFFSET_DIVISOR} "
+            f"candidate={candidate} rounding={rounding} adjusted={adjusted_price} "
+            f"tick={getattr(cfg, 'tick_size', getattr(cfg, 'price_step', 'n/a'))} "
+            f"price_precision={getattr(cfg, 'price_precision', 'n/a')} "
+            f"min_order_size={cfg.min_order_size}"
+        )
 
         # Même prix → rien à faire
         if slot.external_id and slot.price == adjusted_price:

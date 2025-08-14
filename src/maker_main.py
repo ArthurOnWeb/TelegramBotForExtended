@@ -172,7 +172,7 @@ class MarketMaker:
         if not EXPOSURE_SKEW:
             return base_amount
         exposure = await self._get_position_size()
-        direction = Decimal(1 if side == OrderSide.BUY else -1)
+        direction = Decimal(-1 if side == OrderSide.BUY else 1)
         multiplier = Decimal(1) - exposure * direction * EXPOSURE_SKEW
         multiplier = max(Decimal("1"), min(multiplier, Decimal("1.75")))
         adjusted=base_amount * multiplier

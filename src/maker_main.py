@@ -167,15 +167,30 @@ class MarketMaker:
         self._pos_cache = (size, now)
         return size
 
-    async def _apply_exposure_skew(self, base_amount: Decimal, side: OrderSide) -> Decimal:
-        """Adjust order size to reduce net exposure."""
+    async def _apply_exposure_skew(
+        self, base_amount: Decimal, side: OrderSide, price: Optional[Decimal] = None
+    ) -> Decimal:
+        """Adjust order size to reduce net exposure.
+
+        L'exposition est désormais pondérée par le prix courant afin de
+        considérer la valeur réelle de la position."""
         if not EXPOSURE_SKEW:
             return base_amount
         exposure = await self._get_position_size()
+        if exposure == 0:
+            return base_amount
+        if price is None and self._order_book:
+            bid = getattr(self._order_book, "best_bid", None)
+            ask = getattr(self._order_book, "best_ask", None)
+            if bid and ask:
+                price = (bid.price + ask.price) / Decimal("2")
+        if price is None:
+            return base_amount
+        exposure = exposure * price  # pondère par le prix courant
         direction = Decimal(-1 if side == OrderSide.BUY else 1)
         multiplier = Decimal(1) - exposure * direction * EXPOSURE_SKEW
         multiplier = max(Decimal("1"), min(multiplier, Decimal("1.75")))
-        adjusted=base_amount * multiplier
+        adjusted = base_amount * multiplier
         return adjusted.quantize(base_amount)
 
     # ----------------- UPDATE LOOPS (callbacks) -----------------
@@ -332,7 +347,9 @@ class MarketMaker:
         synthetic_amount = self._market.trading_config.calculate_order_size_from_value(
             TARGET_ORDER_USD, adjusted_price
         )
-        synthetic_amount = await self._apply_exposure_skew(synthetic_amount, side)
+        synthetic_amount = await self._apply_exposure_skew(
+            synthetic_amount, side, adjusted_price
+        )
 
         # Important : respect du min size
         min_size = self._market.trading_config.min_order_size

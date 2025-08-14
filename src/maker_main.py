@@ -125,11 +125,6 @@ class MarketMaker:
 
     @staticmethod
     def infer_tick(cfg, px: Decimal) -> Decimal:
-        # two snaps around current price
-        down = cfg.round_price(px, ROUND_FLOOR)
-        up   = cfg.round_price(px + Decimal("1e-9"), ROUND_CEILING)
-        step = up - down
-        if step <= 0 or step > px * Decimal("0.1"):  # fallback guard
             prec = getattr(cfg, "price_precision", 2)
             step = Decimal(1).scaleb(-prec)  # 10^-precision
         return step

@@ -25,6 +25,8 @@ TARGET_ORDER_USD = Decimal(os.getenv("MM_TARGET_USD", "250"))
 OFFSET_DIVISOR = Decimal(os.getenv("MM_OFFSET_DIVISOR", "400"))
 # Limite d'envois concurrents (throttle)
 MAX_IN_FLIGHT = int(os.getenv("MM_MAX_IN_FLIGHT", "4"))
+# Coefficient de skew de taille d'ordre pour réduire l'exposition
+EXPOSURE_SKEW = Decimal(os.getenv("MM_EXPOSURE_SKEW", "0"))
 
 
 @dataclass
@@ -132,7 +134,31 @@ class MarketMaker:
             prec = getattr(cfg, "price_precision", 2)
             step = Decimal(1).scaleb(-prec)  # 10^-precision
             return step
-        return 
+        return
+
+    async def _get_position_size(self) -> Decimal:
+        """Return current position size for the configured market."""
+        async_client = self.account.get_async_client()
+        resp = await call_with_retries(
+            lambda: async_client.account.get_positions(market_names=[self._market.name]),
+            limiter=self._limiter,
+        )
+        positions = resp.data or []
+        if not positions:
+            return Decimal(0)
+        # PositionModel has a Decimal `size` attribute
+        return positions[0].size
+
+    async def _apply_exposure_skew(self, base_amount: Decimal, side: OrderSide) -> Decimal:
+        """Adjust order size to reduce net exposure."""
+        if not EXPOSURE_SKEW:
+            return base_amount
+        exposure = await self._get_position_size()
+        direction = Decimal(1 if side == OrderSide.BUY else -1)
+        multiplier = Decimal(1) - exposure * direction * EXPOSURE_SKEW
+        if multiplier <= 0:
+            return Decimal(0)
+        return base_amount * multiplier
 
     # ----------------- UPDATE LOOPS (callbacks) -----------------
 
@@ -256,6 +282,7 @@ class MarketMaker:
         synthetic_amount = self._market.trading_config.calculate_order_size_from_value(
             TARGET_ORDER_USD, adjusted_price
         )
+        synthetic_amount = await self._apply_exposure_skew(synthetic_amount, side)
 
         # Important : respect du min size
         min_size = self._market.trading_config.min_order_size

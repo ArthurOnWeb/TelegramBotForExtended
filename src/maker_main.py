@@ -123,13 +123,13 @@ class MarketMaker:
                 return
             raise
 
+    @staticmethod
     def infer_tick(cfg, px: Decimal) -> Decimal:
-        # deux snaps autour du prix courant
+        # two snaps around current price
         down = cfg.round_price(px, ROUND_FLOOR)
         up   = cfg.round_price(px + Decimal("1e-9"), ROUND_CEILING)
         step = up - down
-        # garde-fou: si step est aberrant (ex > 10% du prix), fallback sur la précision décimale
-        if step <= 0 or step > px * Decimal("0.1"):
+        if step <= 0 or step > px * Decimal("0.1"):  # fallback guard
             prec = getattr(cfg, "price_precision", 2)
             step = Decimal(1).scaleb(-prec)  # 10^-precision
         return step
@@ -238,21 +238,13 @@ class MarketMaker:
         slots = self._sell_slots if side == OrderSide.SELL else self._buy_slots
         slot = slots[idx]
 
-        # Ecart relatif (ex: pour idx=0 → 1/DIV, idx=1 → 2/DIV, etc.)
+        # offset in ticks based on idx
+        tick = self.infer_tick(self._market.trading_config, best_px)
         rel = (Decimal(1) + Decimal(idx)) / OFFSET_DIVISOR
-        direction = Decimal(1 if side == OrderSide.SELL else -1)
-        candidate = best_px * (Decimal(1) + direction * rel)
-
-        tick = infer_tick(self._market.trading_config, best_px)
-
-        # combien de ticks on veut s’écarter ? (fonction du idx et d’un param réglable)
-        # rel = (1+idx)/OFFSET_DIVISOR  → translate en ticks
-        delta_ticks = max(1, int(( (Decimal(1)+Decimal(idx)) / OFFSET_DIVISOR ) * (best_px / tick)))
+        delta_ticks = max(1, int((rel) * (best_px / tick)))
 
         if side == OrderSide.SELL:
-            # 1 tick au-dessus du best ask minimum
             target = best_px + delta_ticks * tick
-            # snap *à la hausse* sur la grille inférée
             adjusted_price = (target / tick).to_integral_value(rounding=ROUND_CEILING) * tick
         else:
             target = best_px - delta_ticks * tick

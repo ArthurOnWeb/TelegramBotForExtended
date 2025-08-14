@@ -123,6 +123,17 @@ class MarketMaker:
                 return
             raise
 
+    def infer_tick(cfg, px: Decimal) -> Decimal:
+        # deux snaps autour du prix courant
+        down = cfg.round_price(px, ROUND_FLOOR)
+        up   = cfg.round_price(px + Decimal("1e-9"), ROUND_CEILING)
+        step = up - down
+        # garde-fou: si step est aberrant (ex > 10% du prix), fallback sur la précision décimale
+        if step <= 0 or step > px * Decimal("0.1"):
+            prec = getattr(cfg, "price_precision", 2)
+            step = Decimal(1).scaleb(-prec)  # 10^-precision
+        return step
+
     # ----------------- UPDATE LOOPS (callbacks) -----------------
 
     async def _update_sell_orders(self, best_ask: Optional[Decimal]):
@@ -232,18 +243,20 @@ class MarketMaker:
         direction = Decimal(1 if side == OrderSide.SELL else -1)
         candidate = best_px * (Decimal(1) + direction * rel)
 
-        # Arrondi au tick selon le côté
-        rounding = ROUND_CEILING if side == OrderSide.SELL else ROUND_FLOOR
-        adjusted_price = self._market.trading_config.round_price(candidate, rounding)
-        cfg = self._market.trading_config
-        print(
-            f"[{self.market_name}] side={side.name} idx={idx} "
-            f"best_px={best_px} rel={(Decimal(1)+Decimal(idx))/OFFSET_DIVISOR} "
-            f"candidate={candidate} rounding={rounding} adjusted={adjusted_price} "
-            f"tick={getattr(cfg, 'tick_size', getattr(cfg, 'price_step', 'n/a'))} "
-            f"price_precision={getattr(cfg, 'price_precision', 'n/a')} "
-            f"min_order_size={cfg.min_order_size}"
-        )
+        tick = infer_tick(self._market.trading_config, best_px)
+
+        # combien de ticks on veut s’écarter ? (fonction du idx et d’un param réglable)
+        # rel = (1+idx)/OFFSET_DIVISOR  → translate en ticks
+        delta_ticks = max(1, int(( (Decimal(1)+Decimal(idx)) / OFFSET_DIVISOR ) * (best_px / tick)))
+
+        if side == OrderSide.SELL:
+            # 1 tick au-dessus du best ask minimum
+            target = best_px + delta_ticks * tick
+            # snap *à la hausse* sur la grille inférée
+            adjusted_price = (target / tick).to_integral_value(rounding=ROUND_CEILING) * tick
+        else:
+            target = best_px - delta_ticks * tick
+            adjusted_price = (target / tick).to_integral_value(rounding=ROUND_FLOOR) * tick
 
         # Même prix → rien à faire
         if slot.external_id and slot.price == adjusted_price:

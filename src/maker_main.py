@@ -152,7 +152,7 @@ class MarketMaker:
         return
         
     # --- Position cache for exposure calculations ---
-    async def _get_position_size(self) -> Decimal:
+    async def _get_position_value(self) -> Decimal:
         size, ts = self._pos_cache
         now = asyncio.get_running_loop().time()
         if now - ts < self._pos_ttl:
@@ -163,34 +163,28 @@ class MarketMaker:
             limiter=self._limiter,
         )
         positions = resp.data or []
-        size = positions[0].size if positions else Decimal(0)
+        value = positions[0].value if positions else Decimal(0)
+        side = positions[0].side if positions else Decimal(0)
         self._pos_cache = (size, now)
-        return size
+        return value,side
 
     async def _apply_exposure_skew(
         self, base_amount: Decimal, side: OrderSide, price: Optional[Decimal] = None
     ) -> Decimal:
-        """Adjust order size to reduce net exposure.
-
-        L'exposition est désormais pondérée par le prix courant afin de
-        considérer la valeur réelle de la position."""
+        """Adjust order size to reduce net exposure."""
         if not EXPOSURE_SKEW:
             return base_amount
-        exposure = await self._get_position_size()
+        exposure,side = await self._get_position_value()
         if exposure == 0:
             return base_amount
-        if price is None and self._order_book:
-            bid = getattr(self._order_book, "best_bid", None)
-            ask = getattr(self._order_book, "best_ask", None)
-            if bid and ask:
-                price = (bid.price + ask.price) / Decimal("2")
-        if price is None:
+        if OrderSide.SELL and side="SHORT":
+            multiplier = exposure*EXPOSURE_SKEW
+            adjusted = base_amount * multiplier
+        if OrderSide.BUY and side="BUY":
+            multiplier = exposure*EXPOSURE_SKEW
+            adjusted = base_amount * multiplier
+        else:
             return base_amount
-        exposure = exposure * price  # pondère par le prix courant
-        direction = Decimal(-1 if side == OrderSide.BUY else 1)
-        multiplier = Decimal(1) - exposure * direction * EXPOSURE_SKEW
-        multiplier = max(Decimal("1"), min(multiplier, Decimal("1.75")))
-        adjusted = base_amount * multiplier
         return adjusted.quantize(base_amount)
 
     # ----------------- UPDATE LOOPS (callbacks) -----------------

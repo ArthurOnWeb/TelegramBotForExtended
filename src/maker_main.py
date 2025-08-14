@@ -125,8 +125,8 @@ class MarketMaker:
 
     @staticmethod
     def infer_tick(cfg, px: Decimal) -> Decimal:
-            prec = getattr(cfg, "price_precision", 2)
-            step = Decimal(1).scaleb(-prec)  # 10^-precision
+        prec = getattr(cfg, "price_precision", 2)
+        step = Decimal(1).scaleb(-prec)  # 10^-precision
         return step
 
     # ----------------- UPDATE LOOPS (callbacks) -----------------

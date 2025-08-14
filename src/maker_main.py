@@ -164,7 +164,8 @@ class MarketMaker:
         direction = Decimal(1 if side == OrderSide.BUY else -1)
         multiplier = Decimal(1) - exposure * direction * EXPOSURE_SKEW
         multiplier = max(Decimal("1"), min(multiplier, Decimal("1.75")))
-        return base_amount * multiplier
+        adjusted=base_amount * multiplier
+        return adjusted.quantize(base_amount)
 
     # ----------------- UPDATE LOOPS (callbacks) -----------------
 

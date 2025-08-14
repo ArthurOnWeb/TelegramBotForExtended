@@ -54,6 +54,10 @@ class MarketMaker:
         self._market = None
         self._closing = asyncio.Event()
 
+        # Position cache for exposure calculations
+        self._pos_cache: tuple[Decimal, float] = (Decimal(0), 0.0)  # (size, timestamp)
+        self._pos_ttl = 2.0  # seconds
+
     async def start(self):
         # Récupère infos marché une fois
         markets = await self.client.get_markets()
@@ -135,24 +139,22 @@ class MarketMaker:
             step = Decimal(1).scaleb(-prec)  # 10^-precision
             return step
         return
-
-    self._pos_cache = (Decimal(0), 0.0)  # (size, ts)
-self._pos_ttl = 2.0
-
-async def _get_position_size(self) -> Decimal:
-    size, ts = self._pos_cache
-    now = asyncio.get_running_loop().time()
-    if now - ts < self._pos_ttl:
+        
+    # --- Position cache for exposure calculations ---
+    async def _get_position_size(self) -> Decimal:
+        size, ts = self._pos_cache
+        now = asyncio.get_running_loop().time()
+        if now - ts < self._pos_ttl:
+            return size
+        async_client = self.account.get_async_client()
+        resp = await call_with_retries(
+            lambda: async_client.account.get_positions(market_names=[self._market.name]),
+            limiter=self._limiter,
+        )
+        positions = resp.data or []
+        size = positions[0].size if positions else Decimal(0)
+        self._pos_cache = (size, now)
         return size
-    async_client = self.account.get_async_client()
-    resp = await call_with_retries(
-        lambda: async_client.account.get_positions(market_names=[self._market.name]),
-        limiter=self._limiter,
-    )
-    positions = resp.data or []
-    size = positions[0].size if positions else Decimal(0)
-    self._pos_cache = (size, now)
-    return size
 
     async def _apply_exposure_skew(self, base_amount: Decimal, side: OrderSide) -> Decimal:
         """Adjust order size to reduce net exposure."""
@@ -161,8 +163,8 @@ async def _get_position_size(self) -> Decimal:
         exposure = await self._get_position_size()
         direction = Decimal(1 if side == OrderSide.BUY else -1)
         multiplier = Decimal(1) - exposure * direction * EXPOSURE_SKEW
-multiplier = max(Decimal("0.25"), min(multiplier, Decimal("1.75")))
-return (base_amount * multiplier)
+        multiplier = max(Decimal("0.25"), min(multiplier, Decimal("1.75")))
+        return base_amount * multiplier
 
     # ----------------- UPDATE LOOPS (callbacks) -----------------
 

@@ -1,9 +1,9 @@
 # maker_main.py
 import asyncio
 import os
-from pathlib import Path
 import signal
 import traceback
+from pathlib import Path
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Optional, List
@@ -12,16 +12,17 @@ from x10.perpetual.orderbook import OrderBook
 from x10.perpetual.orders import OrderSide
 from x10.perpetual.simple_client.simple_trading_client import BlockingTradingClient
 
-from account import TradingAccount 
+from account import TradingAccount
 from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
+from id_generator import SqliteExternalIdGenerator
 
 
 # --- Paramètres de prod (surcouchables par variables d'env) ---
 MARKET_NAME = os.getenv("MM_MARKET") or input("Market ? ")
 
-# Path to persist the latest external ID
-ID_COUNTER_PATH = Path(__file__).with_name(f"external_id_counter_{MARKET_NAME}.txt")
+# Path to persist external IDs using SQLite for multi-process safety
+ID_DB_PATH = Path(__file__).with_name(f"external_ids_{MARKET_NAME}.db")
 
 LEVELS_PER_SIDE = int(os.getenv("MM_LEVELS", "2"))        # nombre de quotes par côté
 TARGET_ORDER_USD = Decimal(os.getenv("MM_TARGET_USD", "250"))
@@ -64,20 +65,8 @@ class MarketMaker:
         self._pos_cache: tuple[Decimal, str, float] = (Decimal(0), "", 0.0)
         self._pos_ttl = 2.0  # seconds
 
-        # Persistent external-id counter
-        self._id_counter = self._load_last_id()
-
-    @staticmethod
-    def _load_last_id() -> int:
-        try:
-            return int(ID_COUNTER_PATH.read_text().strip())
-        except Exception:
-            return 0
-
-    def _next_external_id(self, side: OrderSide, idx: int) -> str:
-        self._id_counter += 1
-        ID_COUNTER_PATH.write_text(str(self._id_counter))
-        return f"{self.MM_PREFIX}{side.name.lower()}_{idx}_{self._id_counter}"
+        # External-id generator backed by SQLite
+        self._id_generator = SqliteExternalIdGenerator(ID_DB_PATH)
 
     async def _create_order_book(self) -> OrderBook:
         return await OrderBook.create(
@@ -352,7 +341,9 @@ class MarketMaker:
             return
 
         # Nouveau external_id (remplacement via previous_order_external_id)
-        new_external_id = self._next_external_id(side, idx)
+        new_external_id = self._id_generator.next_id(
+            self.MM_PREFIX, side.name.lower(), idx
+        )
 
         try:
             async with self._throttle:

@@ -164,9 +164,9 @@ class MarketMaker:
         )
         positions = resp.data or []
         value = positions[0].value if positions else Decimal(0)
-        side = positions[0].side if positions else Decimal(0)
-        self._pos_cache = (size, now)
-        return value,side
+        side = positions[0].side if positions else ""
+        self._pos_cache = (value, now)
+        return value, side
 
     async def _apply_exposure_skew(
         self, base_amount: Decimal, side: OrderSide, price: Optional[Decimal] = None
@@ -174,17 +174,23 @@ class MarketMaker:
         """Adjust order size to reduce net exposure."""
         if not EXPOSURE_SKEW:
             return base_amount
-        exposure,side = await self._get_position_value()
+
+        exposure, pos_side = await self._get_position_value()
         if exposure == 0:
             return base_amount
-        if OrderSide.SELL and side="SHORT":
-            multiplier = exposure*EXPOSURE_SKEW
-            adjusted = base_amount * multiplier
-        if OrderSide.BUY and side="BUY":
-            multiplier = exposure*EXPOSURE_SKEW
-            adjusted = base_amount * multiplier
-        else:
+
+        reducing_exposure = (
+            (pos_side == "LONG" and side == OrderSide.SELL)
+            or (pos_side == "SHORT" and side == OrderSide.BUY)
+        )
+        if not reducing_exposure:
             return base_amount
+
+        exposure_factor = (abs(exposure) / Decimal(50)) * EXPOSURE_SKEW
+        multiplier = Decimal(1) + exposure_factor
+        multiplier = max(Decimal(1), min(multiplier, Decimal(3)))
+
+        adjusted = base_amount * multiplier
         return adjusted.quantize(base_amount)
 
     # ----------------- UPDATE LOOPS (callbacks) -----------------

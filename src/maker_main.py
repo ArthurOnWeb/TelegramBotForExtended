@@ -17,11 +17,12 @@ from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
 
 
-# Path to persist the latest external ID
-ID_COUNTER_PATH = Path(__file__).with_name("external_id_counter.txt")
-
 # --- Paramètres de prod (surcouchables par variables d'env) ---
 MARKET_NAME = os.getenv("MM_MARKET") or input("Market ? ")
+
+# Path to persist the latest external ID
+ID_COUNTER_PATH = Path(__file__).with_name(f"external_id_counter_{MARKET_NAME}.txt")
+
 LEVELS_PER_SIDE = int(os.getenv("MM_LEVELS", "2"))        # nombre de quotes par côté
 TARGET_ORDER_USD = Decimal(os.getenv("MM_TARGET_USD", "250"))
 # Ecart relatif au meilleur prix : formule : best * (1 +/- (1+idx)/DIVISOR)

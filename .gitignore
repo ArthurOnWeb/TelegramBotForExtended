@@ -207,4 +207,4 @@ marimo/_lsp/
 __marimo__/
 
 # Persistent state for MarketMaker external IDs
-external_id_counter.txt
+external_id_counter_*.txt

@@ -56,7 +56,8 @@ class MarketMaker:
         self._closing = asyncio.Event()
 
         # Position cache for exposure calculations
-        self._pos_cache: tuple[Decimal, float] = (Decimal(0), 0.0)  # (size, timestamp)
+        # Stores a tuple of (size, side, timestamp)
+        self._pos_cache: tuple[Decimal, str, float] = (Decimal(0), "", 0.0)
         self._pos_ttl = 2.0  # seconds
 
     async def _create_order_book(self) -> OrderBook:
@@ -153,10 +154,10 @@ class MarketMaker:
         
     # --- Position cache for exposure calculations ---
     async def _get_position_value(self) -> Decimal:
-        size, ts = self._pos_cache
+        value, side, ts = self._pos_cache
         now = asyncio.get_running_loop().time()
         if now - ts < self._pos_ttl:
-            return size
+            return value, side
         async_client = self.account.get_async_client()
         resp = await call_with_retries(
             lambda: async_client.account.get_positions(market_names=[self._market.name]),
@@ -165,7 +166,7 @@ class MarketMaker:
         positions = resp.data or []
         value = positions[0].value if positions else Decimal(0)
         side = positions[0].side if positions else ""
-        self._pos_cache = (value, now)
+        self._pos_cache = (value, side, now)
         return value, side
 
     async def _apply_exposure_skew(

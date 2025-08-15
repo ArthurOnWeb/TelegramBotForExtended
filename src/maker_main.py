@@ -68,6 +68,9 @@ class MarketMaker:
         # External-id generator backed by SQLite
         self._id_generator = SqliteExternalIdGenerator(ID_DB_PATH)
 
+        # Serialize order placement to avoid concurrent create/replace calls
+        self._placement_lock = asyncio.Lock()
+
     async def _create_order_book(self) -> OrderBook:
         return await OrderBook.create(
             self._endpoint_config,
@@ -210,11 +213,11 @@ class MarketMaker:
             # Un update est déjà en cours → on évite la tempête de tâches
             return
 
-        async def _task(i: int):
-            await self._ensure_slot(side=OrderSide.SELL, idx=i, best_px=best_ask)
-
-        self._pending_sell_job = asyncio.gather(*[asyncio.create_task(_task(i)) for i in range(LEVELS_PER_SIDE)],
-                                                return_exceptions=True)
+        coros = [
+            self._ensure_slot(side=OrderSide.SELL, idx=i, best_px=best_ask)
+            for i in range(LEVELS_PER_SIDE)
+        ]
+        self._pending_sell_job = asyncio.gather(*coros, return_exceptions=True)
         await self._pending_sell_job  # on attend pour séquencer les batchs
 
     async def _update_buy_orders(self, best_bid: Optional[Decimal]):
@@ -223,11 +226,11 @@ class MarketMaker:
         if self._pending_buy_job and not self._pending_buy_job.done():
             return
 
-        async def _task(i: int):
-            await self._ensure_slot(side=OrderSide.BUY, idx=i, best_px=best_bid)
-
-        self._pending_buy_job = asyncio.gather(*[asyncio.create_task(_task(i)) for i in range(LEVELS_PER_SIDE)],
-                                               return_exceptions=True)
+        coros = [
+            self._ensure_slot(side=OrderSide.BUY, idx=i, best_px=best_bid)
+            for i in range(LEVELS_PER_SIDE)
+        ]
+        self._pending_buy_job = asyncio.gather(*coros, return_exceptions=True)
         await self._pending_buy_job
 
     @staticmethod
@@ -244,48 +247,49 @@ class MarketMaker:
         if not self._market:
             return
 
-        # 1) Fetch open orders from server for this market
-        # Prefer the async trading client’s account module if your Blocking client
-        # doesn’t expose get_open_orders. If yours does, feel free to use it directly.
-        async_client = self.account.get_async_client()
-        resp = await call_with_retries(
-            lambda: async_client.account.get_open_orders(market_names=[self._market.name]),
-            limiter=self._limiter,
-        )
-        open_orders = resp.data or []
+        async with self._placement_lock:
+            # 1) Fetch open orders from server for this market
+            # Prefer the async trading client’s account module if your Blocking client
+            # doesn’t expose get_open_orders. If yours does, feel free to use it directly.
+            async_client = self.account.get_async_client()
+            resp = await call_with_retries(
+                lambda: async_client.account.get_open_orders(market_names=[self._market.name]),
+                limiter=self._limiter,
+            )
+            open_orders = resp.data or []
 
-        # Cancel any orders missing an external_id so they can be recreated
-        for o in open_orders:
-            if not o.external_id:
-                await self._safe_cancel(order_id=o.id, external_id=None)
+            # Cancel any orders missing an external_id so they can be recreated
+            for o in open_orders:
+                if not o.external_id:
+                    await self._safe_cancel(order_id=o.id, external_id=None)
 
-        # 2) Keep only our MM orders
-        server_mm = {o.external_id: o for o in open_orders if (o.external_id or "").startswith(self.MM_PREFIX)}
+            # 2) Keep only our MM orders
+            server_mm = {o.external_id: o for o in open_orders if (o.external_id or "").startswith(self.MM_PREFIX)}
 
-        # 3) Local ghosts -> clear slot
-        for slots in (self._buy_slots, self._sell_slots):
-            for i, slot in enumerate(slots):
-                if not slot.external_id:
-                    continue
-                if slot.external_id not in server_mm:
-                    # order disappeared (filled/cancelled/rejected); free the slot
-                    slots[i] = Slot(None, None)
+            # 3) Local ghosts -> clear slot
+            for slots in (self._buy_slots, self._sell_slots):
+                for i, slot in enumerate(slots):
+                    if not slot.external_id:
+                        continue
+                    if slot.external_id not in server_mm:
+                        # order disappeared (filled/cancelled/rejected); free the slot
+                        slots[i] = Slot(None, None)
 
-        # 4) Server orphans -> cancel
-        local_exts = {s.external_id for s in self._all_slots() if s.external_id}
-        orphans = [o for ext, o in server_mm.items() if ext not in local_exts]
-        for o in orphans:
-            await self._safe_cancel(order_id=o.id, external_id=o.external_id)
+            # 4) Server orphans -> cancel
+            local_exts = {s.external_id for s in self._all_slots() if s.external_id}
+            orphans = [o for ext, o in server_mm.items() if ext not in local_exts]
+            for o in orphans:
+                await self._safe_cancel(order_id=o.id, external_id=o.external_id)
 
-        # 5) (Optional) Drift check: if slot price ≠ server price, clear to force re-quote
-        #    (edits are already happening in your _ensure_slot; this just prevents stale state)
-        ext_to_slot = {s.external_id: s for s in self._all_slots() if s.external_id}
-        for ext, o in server_mm.items():
-            s = ext_to_slot.get(ext)
-            if s and s.price is not None and o.price != s.price:
-                # let the next best bid/ask callback re-place
-                s.external_id = None
-                s.price = None
+            # 5) (Optional) Drift check: if slot price ≠ server price, clear to force re-quote
+            #    (edits are already happening in your _ensure_slot; this just prevents stale state)
+            ext_to_slot = {s.external_id: s for s in self._all_slots() if s.external_id}
+            for ext, o in server_mm.items():
+                s = ext_to_slot.get(ext)
+                if s and s.price is not None and o.price != s.price:
+                    # let the next best bid/ask callback re-place
+                    s.external_id = None
+                    s.price = None
 
     async def _reconciler_loop(self, interval_sec: float = 15.0):
         while not self._closing.is_set():
@@ -346,19 +350,20 @@ class MarketMaker:
         )
 
         try:
-            async with self._throttle:
-                await call_with_retries(
-                    lambda: self.client.create_and_place_order(
-                        market_name=self._market.name,
-                        amount_of_synthetic=synthetic_amount,
-                        price=adjusted_price,
-                        side=side,
-                        post_only=True,
-                        previous_order_external_id=slot.external_id,
-                        external_id=new_external_id,
-                    ),
-                    limiter=self._limiter,
-                )
+            async with self._placement_lock:
+                async with self._throttle:
+                    await call_with_retries(
+                        lambda: self.client.create_and_place_order(
+                            market_name=self._market.name,
+                            amount_of_synthetic=synthetic_amount,
+                            price=adjusted_price,
+                            side=side,
+                            post_only=True,
+                            previous_order_external_id=slot.external_id,
+                            external_id=new_external_id,
+                        ),
+                        limiter=self._limiter,
+                    )
 
             # ✅ success → update slot
             slots[idx] = Slot(external_id=new_external_id, price=adjusted_price)
@@ -371,18 +376,19 @@ class MarketMaker:
             elif self._is_edit_not_found(e):
                 # 1142 → fresh create (no previous_order_external_id)
                 try:
-                    async with self._throttle:
-                        async def _fresh():
-                            return await self.client.create_and_place_order(
-                                market_name=self._market.name,
-                                amount_of_synthetic=synthetic_amount,
-                                price=adjusted_price,
-                                side=side,
-                                post_only=True,
-                                previous_order_external_id=None,     # ← important
-                                external_id=new_external_id,
-                            )
-                    resp = await call_with_retries(_fresh, limiter=self._limiter)
+                    async with self._placement_lock:
+                        async with self._throttle:
+                            async def _fresh():
+                                return await self.client.create_and_place_order(
+                                    market_name=self._market.name,
+                                    amount_of_synthetic=synthetic_amount,
+                                    price=adjusted_price,
+                                    side=side,
+                                    post_only=True,
+                                    previous_order_external_id=None,     # ← important
+                                    external_id=new_external_id,
+                                )
+                            resp = await call_with_retries(_fresh, limiter=self._limiter)
                     slots[idx] = Slot(external_id=new_external_id, price=adjusted_price)
                     return
                 except Exception as e2:

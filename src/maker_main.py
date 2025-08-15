@@ -16,6 +16,7 @@ from account import TradingAccount
 from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
 from id_generator import SqliteExternalIdGenerator
+from utils import logger
 
 
 # --- Paramètres de prod (surcouchables par variables d'env) ---
@@ -206,6 +207,12 @@ class MarketMaker:
 
     # ----------------- UPDATE LOOPS (callbacks) -----------------
 
+    def _log_gather_exceptions(self, results: list, context: str) -> None:
+        """Log exceptions returned from ``asyncio.gather`` calls."""
+        for idx, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error("[%s #%d] %s", context, idx, exc_info=result)
+
     async def _update_sell_orders(self, best_ask: Optional[Decimal]):
         if self._closing.is_set():
             return
@@ -218,7 +225,8 @@ class MarketMaker:
             for i in range(LEVELS_PER_SIDE)
         ]
         self._pending_sell_job = asyncio.gather(*coros, return_exceptions=True)
-        await self._pending_sell_job  # on attend pour séquencer les batchs
+        results = await self._pending_sell_job  # on attend pour séquencer les batchs
+        self._log_gather_exceptions(results, "sell")
 
     async def _update_buy_orders(self, best_bid: Optional[Decimal]):
         if self._closing.is_set():
@@ -231,7 +239,8 @@ class MarketMaker:
             for i in range(LEVELS_PER_SIDE)
         ]
         self._pending_buy_job = asyncio.gather(*coros, return_exceptions=True)
-        await self._pending_buy_job
+        results = await self._pending_buy_job
+        self._log_gather_exceptions(results, "buy")
 
     @staticmethod
     def _is_edit_not_found(e: Exception) -> bool:

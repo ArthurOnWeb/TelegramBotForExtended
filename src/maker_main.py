@@ -238,19 +238,23 @@ class MarketMaker:
         s = str(e)
         return "Edit order not found" in s or '"code":1142' in s or "code\": 1142" in s
 
-    async def reconcile(self):
+    async def detect_reconcile(self) -> tuple[list[tuple[list[Slot], int]], list]:
         """
-        Periodically reconcile local slots with server state.
-        - clears local ghosts
-        - cancels server orphans
+        Gather server-side open orders and detect discrepancies with local slots.
+
+        Returns a tuple ``(missing_slots, orphan_orders)`` where:
+          * ``missing_slots`` is a list of ``(slots_list, index)`` pairs for local
+            slots that no longer have a corresponding server order or whose server
+            price has drifted.
+          * ``orphan_orders`` is a list of server orders to cancel, including
+            orders lacking an external ID or MM orders not tracked locally.
+
+        This detection step performs no order creation or cancellation.
         """
         if not self._market:
-            return
+            return [], []
 
         async with self._placement_lock:
-            # 1) Fetch open orders from server for this market
-            # Prefer the async trading client’s account module if your Blocking client
-            # doesn’t expose get_open_orders. If yours does, feel free to use it directly.
             async_client = self.account.get_async_client()
             resp = await call_with_retries(
                 lambda: async_client.account.get_open_orders(market_names=[self._market.name]),
@@ -258,43 +262,69 @@ class MarketMaker:
             )
             open_orders = resp.data or []
 
-            # Cancel any orders missing an external_id so they can be recreated
-            for o in open_orders:
-                if not o.external_id:
-                    await self._safe_cancel(order_id=o.id, external_id=None)
+            # Orders lacking an external_id should be cancelled later
+            orphan_orders = [o for o in open_orders if not o.external_id]
 
-            # 2) Keep only our MM orders
-            server_mm = {o.external_id: o for o in open_orders if (o.external_id or "").startswith(self.MM_PREFIX)}
+            server_mm = {
+                o.external_id: o
+                for o in open_orders
+                if (o.external_id or "").startswith(self.MM_PREFIX)
+            }
 
-            # 3) Local ghosts -> clear slot
+            # Build mapping of local external IDs to slots
+            ext_to_slot: dict[str, tuple[list[Slot], int, Slot]] = {}
             for slots in (self._buy_slots, self._sell_slots):
                 for i, slot in enumerate(slots):
-                    if not slot.external_id:
-                        continue
-                    if slot.external_id not in server_mm:
-                        # order disappeared (filled/cancelled/rejected); free the slot
-                        slots[i] = Slot(None, None)
+                    if slot.external_id:
+                        ext_to_slot[slot.external_id] = (slots, i, slot)
 
-            # 4) Server orphans -> cancel
-            local_exts = {s.external_id for s in self._all_slots() if s.external_id}
-            orphans = [o for ext, o in server_mm.items() if ext not in local_exts]
-            for o in orphans:
-                await self._safe_cancel(order_id=o.id, external_id=o.external_id)
+            missing_slots: list[tuple[list[Slot], int]] = []
+            seen: set[tuple[int, int]] = set()
 
-            # 5) (Optional) Drift check: if slot price ≠ server price, clear to force re-quote
-            #    (edits are already happening in your _ensure_slot; this just prevents stale state)
-            ext_to_slot = {s.external_id: s for s in self._all_slots() if s.external_id}
-            for ext, o in server_mm.items():
-                s = ext_to_slot.get(ext)
-                if s and s.price is not None and o.price != s.price:
-                    # let the next best bid/ask callback re-place
-                    s.external_id = None
-                    s.price = None
+            # Local ghosts: slot external_id missing on server
+            for ext, (slots, i, _) in ext_to_slot.items():
+                key = (id(slots), i)
+                if ext not in server_mm and key not in seen:
+                    missing_slots.append((slots, i))
+                    seen.add(key)
+
+            # Drift check: server order price differs from local slot
+            for ext, order in server_mm.items():
+                info = ext_to_slot.get(ext)
+                if not info:
+                    continue
+                slots, i, slot = info
+                key = (id(slots), i)
+                if slot.price is not None and order.price != slot.price and key not in seen:
+                    missing_slots.append((slots, i))
+                    seen.add(key)
+
+            # Server orphans: MM orders not represented locally
+            local_exts = set(ext_to_slot.keys())
+            for ext, order in server_mm.items():
+                if ext not in local_exts:
+                    orphan_orders.append(order)
+
+            return missing_slots, orphan_orders
+
+    async def reconcile(self, missing_slots: list[tuple[list[Slot], int]], orphan_orders: list):
+        """
+        Apply reconciliation actions detected by :meth:`detect_reconcile`.
+
+        Cancels ``orphan_orders`` via :meth:`_safe_cancel` and clears any
+        ``missing_slots`` so that fresh orders may be placed later.
+        """
+        for slots, i in missing_slots:
+            slots[i] = Slot(None, None)
+
+        for order in orphan_orders:
+            await self._safe_cancel(order_id=order.id, external_id=order.external_id)
 
     async def _reconciler_loop(self, interval_sec: float = 15.0):
         while not self._closing.is_set():
             try:
-                await self.reconcile()
+                missing, orphans = await self.detect_reconcile()
+                await self.reconcile(missing, orphans)
             except Exception as e:
                 # keep going; log if you have a logger
                 print(f"[reconcile] error: {e}")

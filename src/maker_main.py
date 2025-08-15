@@ -1,7 +1,7 @@
 # maker_main.py
 import asyncio
 import os
-import random
+from pathlib import Path
 import signal
 import traceback
 from dataclasses import dataclass
@@ -16,6 +16,9 @@ from account import TradingAccount
 from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
 
+
+# Path to persist the latest external ID
+ID_COUNTER_PATH = Path(__file__).with_name("external_id_counter.txt")
 
 # --- Paramètres de prod (surcouchables par variables d'env) ---
 MARKET_NAME = os.getenv("MM_MARKET") or input("Market ? ")
@@ -59,6 +62,21 @@ class MarketMaker:
         # Stores a tuple of (size, side, timestamp)
         self._pos_cache: tuple[Decimal, str, float] = (Decimal(0), "", 0.0)
         self._pos_ttl = 2.0  # seconds
+
+        # Persistent external-id counter
+        self._id_counter = self._load_last_id()
+
+    @staticmethod
+    def _load_last_id() -> int:
+        try:
+            return int(ID_COUNTER_PATH.read_text().strip())
+        except Exception:
+            return 0
+
+    def _next_external_id(self, side: OrderSide, idx: int) -> str:
+        self._id_counter += 1
+        ID_COUNTER_PATH.write_text(str(self._id_counter))
+        return f"{self.MM_PREFIX}{side.name.lower()}_{idx}_{self._id_counter}"
 
     async def _create_order_book(self) -> OrderBook:
         return await OrderBook.create(
@@ -247,6 +265,11 @@ class MarketMaker:
         )
         open_orders = resp.data or []
 
+        # Cancel any orders missing an external_id so they can be recreated
+        for o in open_orders:
+            if not o.external_id:
+                await self._safe_cancel(order_id=o.id, external_id=None)
+
         # 2) Keep only our MM orders
         server_mm = {o.external_id: o for o in open_orders if (o.external_id or "").startswith(self.MM_PREFIX)}
 
@@ -359,7 +382,7 @@ class MarketMaker:
             return
 
         # Nouveau external_id (remplacement via previous_order_external_id)
-        new_external_id = f"{self.MM_PREFIX}{side.name.lower()}_{idx}_{random.randint(1, 10**18)}"
+        new_external_id = self._next_external_id(side, idx)
 
         try:
             async with self._throttle:

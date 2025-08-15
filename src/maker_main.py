@@ -110,8 +110,7 @@ class MarketMaker:
         self._order_book = await self._create_order_book()
 
         self._reconcile_task = asyncio.create_task(self._reconciler_loop(15.0))
-        self._refresh_task = asyncio.create_task(self._hard_refresh_loop(600.0))
-
+        
     async def stop(self):
         self._closing.set()
         # Optionnel : cancel quotes à l’arrêt (à toi de décider)
@@ -308,37 +307,7 @@ class MarketMaker:
                 print(f"[reconcile] error: {e}")
             await asyncio.sleep(interval_sec)
 
-    async def hard_refresh(self):
-        """Cancel all orders and reopen the order book."""
-        if self._closing.is_set() or not self._market:
-            return
-        try:
-            await call_with_retries(
-                lambda: self.client.mass_cancel(markets=[self._market.name]),
-                limiter=self._limiter,
-            )
-        except Exception:
-            pass
-
-        for slots in (self._buy_slots, self._sell_slots):
-            for i in range(len(slots)):
-                slots[i] = Slot(None, None)
-        self._pending_buy_job = None
-        self._pending_sell_job = None
-
-        if self._order_book:
-            await self._order_book.close()
-        self._order_book = await self._create_order_book()
-
-    async def _hard_refresh_loop(self, interval_sec: float = 600.0):
-        while not self._closing.is_set():
-            await asyncio.sleep(interval_sec)
-            if self._closing.is_set():
-                break
-            try:
-                await self.hard_refresh()
-            except Exception as e:
-                print(f"[hard_refresh] error: {e}")
+    
 
     # ----------------- CORE PLACEMENT LOGIC -----------------
 

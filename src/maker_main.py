@@ -2,6 +2,7 @@
 import asyncio
 import os
 import signal
+import time
 import traceback
 from pathlib import Path
 from dataclasses import dataclass
@@ -47,6 +48,10 @@ MAX_IN_FLIGHT = int(os.getenv("MM_MAX_IN_FLIGHT", "4"))
 EXPOSURE_SKEW = Decimal(os.getenv("MM_EXPOSURE_SKEW", "0"))
 # Interval for background reconciliation (seconds)
 RECONCILE_INTERVAL_SEC = float(os.getenv("MM_RECONCILE_INTERVAL", "5"))
+
+# Périodicité de vérification de l'ordre book et âge max (en secondes)
+REFRESH_INTERVAL_SEC = float(os.getenv("MM_REFRESH_INTERVAL", "5"))
+MAX_OB_AGE_SEC = float(os.getenv("MM_OB_MAX_AGE", "15"))
 
 
 @dataclass
@@ -116,6 +121,7 @@ class MarketMaker:
         self._order_book = await self._create_order_book()
 
         self._reconcile_task = asyncio.create_task(self._reconciler_loop(RECONCILE_INTERVAL_SEC))
+        self._refresh_task = asyncio.create_task(self._refresh_loop())
         
     async def stop(self):
         self._closing.set()
@@ -351,6 +357,32 @@ class MarketMaker:
             await self.reconcile(missing, orphans)
         except Exception as e:
             print(f"[reconcile] error: {e}")
+
+    async def _refresh_loop(self):
+        while not self._closing.is_set():
+            await asyncio.sleep(REFRESH_INTERVAL_SEC)
+            ob = self._order_book
+            if not ob:
+                continue
+            last_update = None
+            for attr in ("last_update_time", "last_update", "last_update_ts"):
+                last_update = getattr(ob, attr, None)
+                if last_update:
+                    break
+            if isinstance(last_update, (int, float)):
+                age = time.time() - last_update
+            elif getattr(last_update, "timestamp", None):
+                age = time.time() - last_update.timestamp()
+            else:
+                age = MAX_OB_AGE_SEC + 1
+            is_closed = bool(getattr(ob, "is_closed", False) or getattr(ob, "closed", False))
+            if age > MAX_OB_AGE_SEC or is_closed:
+                try:
+                    await ob.close()
+                except Exception:
+                    logger.exception("Error closing stale OrderBook")
+                self._order_book = await self._create_order_book()
+                logger.info("OrderBook stream reconnected")
 
     async def _reconciler_loop(self, interval_sec: float = RECONCILE_INTERVAL_SEC):
         while not self._closing.is_set():

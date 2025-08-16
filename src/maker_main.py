@@ -206,7 +206,7 @@ class MarketMaker:
             return base_amount
 
         exposure, pos_side = await self._get_position_value()
-        if exposure == 0:
+        if exposure <= 500:
             return base_amount
 
         reducing_exposure = (

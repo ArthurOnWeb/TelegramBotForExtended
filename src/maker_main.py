@@ -437,9 +437,28 @@ class MarketMaker:
                 return
             else:
                 print("Place/replace failed:\n", traceback.format_exc())
-                # If we failed *and* we tried to replace a non-existent order,
-                # don’t keep the stale external_id around:
-                if slot.external_id:
+
+                # Après un échec, vérifie si l’ordre a quand même été créé
+                try:
+                    async_client = self.account.get_async_client()
+                    resp = await call_with_retries(
+                        lambda: async_client.account.get_open_orders(
+                            market_names=[self._market.name],
+                            external_ids=[new_external_id],
+                        ),
+                        limiter=self._limiter,
+                    )
+                    open_orders = resp.data or []
+                except Exception:
+                    open_orders = []
+
+                if open_orders:
+                    order = open_orders[0]
+                    slots[idx] = Slot(
+                        external_id=order.external_id, price=order.price
+                    )
+                elif slot.external_id:
+                    # L’ordre est absent → on réessaiera la création plus tard
                     slots[idx] = Slot(external_id=None, price=None)
 # ----------------- runner -----------------
 

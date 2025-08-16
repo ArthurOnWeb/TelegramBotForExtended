@@ -12,12 +12,29 @@ class TokenBucket:
         self.capacity = capacity
         self.tokens = capacity
         self.refill_per_sec = refill_per_sec
-        self._lock = asyncio.Lock()
+        self._cond = asyncio.Condition()
         self._last = time.monotonic()
+        self._notify_handle = None
+
+    def _schedule_notify(self, delay: float):
+        loop = asyncio.get_running_loop()
+        when = loop.time() + delay
+        handle = self._notify_handle
+        if handle is None or handle.when() > when:
+            if handle is not None:
+                handle.cancel()
+            self._notify_handle = loop.call_at(when, self._wake)
+
+    def _wake(self):
+        self._notify_handle = None
+        async def _notify():
+            async with self._cond:
+                self._cond.notify_all()
+        asyncio.create_task(_notify())
 
     async def acquire(self, n: int = 1):
-        while True:
-            async with self._lock:
+        async with self._cond:
+            while True:
                 now = time.monotonic()
                 elapsed = now - self._last
                 self._last = now
@@ -25,8 +42,9 @@ class TokenBucket:
                 if self.tokens >= n:
                     self.tokens -= n
                     return
-                need = (n - self.tokens) / self.refill_per_sec
-            await asyncio.sleep(max(need, 0.005))
+                need = max((n - self.tokens) / self.refill_per_sec, 0.005)
+                self._schedule_notify(need)
+                await self._cond.wait()
 
 def build_rate_limiter():
     # If you’ve got MM rate-limit, set MM_MARKET_MAKER=1

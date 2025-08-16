@@ -74,6 +74,7 @@ class MarketMaker:
         self._order_book: Optional[OrderBook] = None
         self._market = None
         self._closing = asyncio.Event()
+        self._tick: Decimal | None = None
 
         # Position cache for exposure calculations
         # Stores a tuple of (size, side, timestamp)
@@ -102,6 +103,7 @@ class MarketMaker:
         if self.market_name not in markets:
             raise RuntimeError(f"Market {self.market_name} introuvable.")
         self._market = markets[self.market_name]
+        self._tick = self.get_tick(self._market.trading_config)
 
         # (optionnel) Clean ciblé au démarrage
 
@@ -165,14 +167,11 @@ class MarketMaker:
 
     @staticmethod
     def get_tick(cfg) -> Decimal:
-        tick=Decimal(str(getattr(cfg, "min_price_change", "0.001")))
-        if tick!=None:
-            return tick
-        else:
-            prec = getattr(cfg, "price_precision", 2)
-            step = Decimal(1).scaleb(-prec)  # 10^-precision
-            return step
-        return
+        min_change = getattr(cfg, "min_price_change", None)
+        if min_change is not None:
+            return Decimal(str(min_change))
+        prec = getattr(cfg, "price_precision", 2)
+        return Decimal(1).scaleb(-prec)  # 10^-precision
         
     # --- Position cache for exposure calculations ---
     async def _get_position_value(self) -> Decimal:
@@ -375,7 +374,7 @@ class MarketMaker:
         slot = slots[idx]
 
         # offset in ticks based on idx
-        tick = self.get_tick(self._market.trading_config)
+        tick = self._tick
         rel = (Decimal(1) + Decimal(idx)) / OFFSET_DIVISOR
         direction = Decimal(1 if side == OrderSide.SELL else -1)
         candidate = best_px * (Decimal(1) + direction * rel)

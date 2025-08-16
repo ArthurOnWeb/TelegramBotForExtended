@@ -52,6 +52,8 @@ RECONCILE_INTERVAL_SEC = float(os.getenv("MM_RECONCILE_INTERVAL", "5"))
 # Périodicité de vérification de l'ordre book et âge max (en secondes)
 REFRESH_INTERVAL_SEC = float(os.getenv("MM_REFRESH_INTERVAL", "5"))
 MAX_OB_AGE_SEC = float(os.getenv("MM_OB_MAX_AGE", "15"))
+# Warn if order placement takes longer than this many seconds
+PLACE_WARN_SEC = float(os.getenv("MM_PLACE_WARN_SEC", "5"))
 
 
 @dataclass
@@ -398,119 +400,133 @@ class MarketMaker:
         Calcule un prix ajusté par rapport au best bid/ask,
         arrondit au tick, et fait un replace si nécessaire.
         """
-        
-        if self._closing.is_set() or best_px is None:
-            return
 
-        slots = self._sell_slots if side == OrderSide.SELL else self._buy_slots
-        slot = slots[idx]
-
-        # offset in ticks based on idx
-        tick = self._tick
-        rel = (Decimal(1) + Decimal(idx)) / OFFSET_DIVISOR
-        direction = Decimal(1 if side == OrderSide.SELL else -1)
-        candidate = best_px * (Decimal(1) + direction * rel)
-        
-        adjusted_price = candidate.quantize(
-        tick, rounding=(ROUND_CEILING if side == OrderSide.SELL else ROUND_FLOOR)
-        )
-
-        # Même prix → rien à faire
-        if slot.external_id and slot.price == adjusted_price:
-            return
-
-        # Taille en synthétique selon une cible USD
-        synthetic_amount = self._market.trading_config.calculate_order_size_from_value(
-            TARGET_ORDER_USD, adjusted_price
-        )
-        synthetic_amount = await self._apply_exposure_skew(
-            synthetic_amount, side, adjusted_price
-        )
-
-        # Important : respect du min size
-        min_size = self._market.trading_config.min_order_size
-        if synthetic_amount < min_size:
-            # Ajuste TARGET_ORDER_USD dans l’env si besoin
-            return
-
-        # Nouveau external_id (remplacement via previous_order_external_id)
-        new_external_id = uuid_external_id(
-            self.MM_PREFIX, side.name.lower(), idx
-        )
-
+        start = time.monotonic()
+        order_id: Optional[str] = None
         try:
-            async with self._placement_lock:
-                async with self._throttle:
-                    await call_with_retries(
-                        lambda: self.client.create_and_place_order(
-                            market_name=self._market.name,
-                            amount_of_synthetic=synthetic_amount,
-                            price=adjusted_price,
-                            side=side,
-                            post_only=True,
-                            previous_order_external_id=slot.external_id,
-                            external_id=new_external_id,
-                        ),
-                        limiter=self._limiter,
-                    )
-
-            # ✅ success → update slot
-            slots[idx] = Slot(external_id=new_external_id, price=adjusted_price)
-
-        except Exception as e:
-            # Workaround SDK bug – don’t let this crash the loop
-            if isinstance(e, RuntimeError) and "Lock is not acquired" in str(e):
-                # treat as failed attempt, fall-through to maybe fresh create
-                pass
-            elif self._is_edit_not_found(e):
-                # 1142 → fresh create (no previous_order_external_id)
-                try:
-                    async with self._placement_lock:
-                        async with self._throttle:
-                            async def _fresh():
-                                return await self.client.create_and_place_order(
-                                    market_name=self._market.name,
-                                    amount_of_synthetic=synthetic_amount,
-                                    price=adjusted_price,
-                                    side=side,
-                                    post_only=True,
-                                    previous_order_external_id=None,     # ← important
-                                    external_id=new_external_id,
-                                )
-                            resp = await call_with_retries(_fresh, limiter=self._limiter)
-                    slots[idx] = Slot(external_id=new_external_id, price=adjusted_price)
-                    return
-                except Exception as e2:
-                    print("Fresh create failed:\n", traceback.format_exc())
-                    # Clear the slot so next tick won’t keep trying to replace a ghost
-                    slots[idx] = Slot(external_id=None, price=None)
+            if self._closing.is_set() or best_px is None:
                 return
-            else:
-                print("Place/replace failed:\n", traceback.format_exc())
-                asyncio.create_task(self._reconcile_once())
 
-                # Après un échec, vérifie si l’ordre a quand même été créé
-                try:
-                    async_client = self.account.get_async_client()
-                    resp = await call_with_retries(
-                        lambda: async_client.account.get_open_orders(
-                            market_names=[self._market.name],
-                            external_ids=[new_external_id],
-                        ),
-                        limiter=self._limiter,
-                    )
-                    open_orders = resp.data or []
-                except Exception:
-                    open_orders = []
+            slots = self._sell_slots if side == OrderSide.SELL else self._buy_slots
+            slot = slots[idx]
+            order_id = slot.external_id
 
-                if open_orders:
-                    order = open_orders[0]
-                    slots[idx] = Slot(
-                        external_id=order.external_id, price=order.price
-                    )
-                elif slot.external_id:
-                    # L’ordre est absent → on réessaiera la création plus tard
-                    slots[idx] = Slot(external_id=None, price=None)
+            # offset in ticks based on idx
+            tick = self._tick
+            rel = (Decimal(1) + Decimal(idx)) / OFFSET_DIVISOR
+            direction = Decimal(1 if side == OrderSide.SELL else -1)
+            candidate = best_px * (Decimal(1) + direction * rel)
+
+            adjusted_price = candidate.quantize(
+                tick, rounding=(ROUND_CEILING if side == OrderSide.SELL else ROUND_FLOOR)
+            )
+
+            # Même prix → rien à faire
+            if slot.external_id and slot.price == adjusted_price:
+                return
+
+            # Taille en synthétique selon une cible USD
+            synthetic_amount = self._market.trading_config.calculate_order_size_from_value(
+                TARGET_ORDER_USD, adjusted_price
+            )
+            synthetic_amount = await self._apply_exposure_skew(
+                synthetic_amount, side, adjusted_price
+            )
+
+            # Important : respect du min size
+            min_size = self._market.trading_config.min_order_size
+            if synthetic_amount < min_size:
+                # Ajuste TARGET_ORDER_USD dans l’env si besoin
+                return
+
+            # Nouveau external_id (remplacement via previous_order_external_id)
+            new_external_id = uuid_external_id(
+                self.MM_PREFIX, side.name.lower(), idx
+            )
+            order_id = new_external_id
+
+            try:
+                async with self._placement_lock:
+                    async with self._throttle:
+                        await call_with_retries(
+                            lambda: self.client.create_and_place_order(
+                                market_name=self._market.name,
+                                amount_of_synthetic=synthetic_amount,
+                                price=adjusted_price,
+                                side=side,
+                                post_only=True,
+                                previous_order_external_id=slot.external_id,
+                                external_id=new_external_id,
+                            ),
+                            limiter=self._limiter,
+                        )
+
+                # ✅ success → update slot
+                slots[idx] = Slot(external_id=new_external_id, price=adjusted_price)
+
+            except Exception as e:
+                # Workaround SDK bug – don’t let this crash the loop
+                if isinstance(e, RuntimeError) and "Lock is not acquired" in str(e):
+                    # treat as failed attempt, fall-through to maybe fresh create
+                    pass
+                elif self._is_edit_not_found(e):
+                    # 1142 → fresh create (no previous_order_external_id)
+                    try:
+                        async with self._placement_lock:
+                            async with self._throttle:
+                                async def _fresh():
+                                    return await self.client.create_and_place_order(
+                                        market_name=self._market.name,
+                                        amount_of_synthetic=synthetic_amount,
+                                        price=adjusted_price,
+                                        side=side,
+                                        post_only=True,
+                                        previous_order_external_id=None,     # ← important
+                                        external_id=new_external_id,
+                                    )
+                                resp = await call_with_retries(_fresh, limiter=self._limiter)
+                        slots[idx] = Slot(external_id=new_external_id, price=adjusted_price)
+                        return
+                    except Exception as e2:
+                        print("Fresh create failed:\n", traceback.format_exc())
+                        # Clear the slot so next tick won’t keep trying to replace a ghost
+                        slots[idx] = Slot(external_id=None, price=None)
+                    return
+                else:
+                    print("Place/replace failed:\n", traceback.format_exc())
+                    asyncio.create_task(self._reconcile_once())
+
+                    # Après un échec, vérifie si l’ordre a quand même été créé
+                    try:
+                        async_client = self.account.get_async_client()
+                        resp = await call_with_retries(
+                            lambda: async_client.account.get_open_orders(
+                                market_names=[self._market.name],
+                                external_ids=[new_external_id],
+                            ),
+                            limiter=self._limiter,
+                        )
+                        open_orders = resp.data or []
+                    except Exception:
+                        open_orders = []
+
+                    if open_orders:
+                        order = open_orders[0]
+                        slots[idx] = Slot(
+                            external_id=order.external_id, price=order.price
+                        )
+                    elif slot.external_id:
+                        # L’ordre est absent → on réessaiera la création plus tard
+                        slots[idx] = Slot(external_id=None, price=None)
+        finally:
+            elapsed = time.monotonic() - start
+            if elapsed > PLACE_WARN_SEC:
+                logger.warning(
+                    "ensure_slot took %.3fs for order %s side %s",
+                    elapsed,
+                    order_id,
+                    side,
+                )
 # ----------------- runner -----------------
 
 

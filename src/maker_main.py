@@ -209,9 +209,9 @@ class MarketMaker:
         if not reducing_exposure:
             return base_amount
 
-        exposure_factor = (abs(exposure) / Decimal(50)) * EXPOSURE_SKEW
+        exposure_factor = (abs(exposure) / Decimal(TARGET_ORDER_USD)) * EXPOSURE_SKEW
         multiplier = Decimal(1) + exposure_factor
-        multiplier = max(Decimal(1), min(multiplier, Decimal(3)))
+        multiplier = max(Decimal(1), min(multiplier, Decimal(1.75)))
 
         adjusted = base_amount * multiplier
         return adjusted.quantize(base_amount)

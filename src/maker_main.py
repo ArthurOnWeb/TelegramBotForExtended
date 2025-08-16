@@ -274,23 +274,26 @@ class MarketMaker:
         if not self._market:
             return [], []
 
+        async_client = self.account.get_async_client()
+        resp = await call_with_retries(
+            # Network I/O should not hold the placement lock
+            lambda: async_client.account.get_open_orders(market_names=[self._market.name]),
+            limiter=self._limiter,
+        )
+        open_orders = resp.data or []
+
+        # Orders lacking an external_id should be cancelled later
+        orphan_orders = [o for o in open_orders if not o.external_id]
+
+        server_mm = {
+            o.external_id: o
+            for o in open_orders
+            if (o.external_id or "").startswith(self.MM_PREFIX)
+        }
+
+        # Access to slot structures must be serialized to avoid races with
+        # order placement; hold the lock only for the minimum duration.
         async with self._placement_lock:
-            async_client = self.account.get_async_client()
-            resp = await call_with_retries(
-                lambda: async_client.account.get_open_orders(market_names=[self._market.name]),
-                limiter=self._limiter,
-            )
-            open_orders = resp.data or []
-
-            # Orders lacking an external_id should be cancelled later
-            orphan_orders = [o for o in open_orders if not o.external_id]
-
-            server_mm = {
-                o.external_id: o
-                for o in open_orders
-                if (o.external_id or "").startswith(self.MM_PREFIX)
-            }
-
             # Build mapping of local external IDs to slots
             ext_to_slot: dict[str, tuple[list[Slot], int, Slot]] = {}
             for slots in (self._buy_slots, self._sell_slots):
@@ -319,13 +322,13 @@ class MarketMaker:
                     missing_slots.append((slots, i))
                     seen.add(key)
 
-            # Server orphans: MM orders not represented locally
-            local_exts = set(ext_to_slot.keys())
-            for ext, order in server_mm.items():
-                if ext not in local_exts:
-                    orphan_orders.append(order)
+        # Server orphans: MM orders not represented locally
+        local_exts = set(ext_to_slot.keys())
+        for ext, order in server_mm.items():
+            if ext not in local_exts:
+                orphan_orders.append(order)
 
-            return missing_slots, orphan_orders
+        return missing_slots, orphan_orders
 
     async def reconcile(self, missing_slots: list[tuple[list[Slot], int]], orphan_orders: list):
         """
@@ -334,8 +337,11 @@ class MarketMaker:
         Cancels ``orphan_orders`` via :meth:`_safe_cancel` and clears any
         ``missing_slots`` so that fresh orders may be placed later.
         """
-        for slots, i in missing_slots:
-            slots[i] = Slot(None, None)
+        # Protect slot updates; cancelling orders happens without the lock so
+        # other placements are not blocked.
+        async with self._placement_lock:
+            for slots, i in missing_slots:
+                slots[i] = Slot(None, None)
 
         for order in orphan_orders:
             await self._safe_cancel(order_id=order.id, external_id=order.external_id)

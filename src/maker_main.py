@@ -33,6 +33,8 @@ OFFSET_DIVISOR = Decimal(os.getenv("MM_OFFSET_DIVISOR", "400"))
 MAX_IN_FLIGHT = int(os.getenv("MM_MAX_IN_FLIGHT", "4"))
 # Coefficient de skew de taille d'ordre pour réduire l'exposition
 EXPOSURE_SKEW = Decimal(os.getenv("MM_EXPOSURE_SKEW", "0"))
+# Interval for background reconciliation (seconds)
+RECONCILE_INTERVAL_SEC = float(os.getenv("MM_RECONCILE_INTERVAL", "5"))
 
 
 @dataclass
@@ -102,7 +104,7 @@ class MarketMaker:
         # OrderBook (callbacks → on schedule des updates)
         self._order_book = await self._create_order_book()
 
-        self._reconcile_task = asyncio.create_task(self._reconciler_loop(15.0))
+        self._reconcile_task = asyncio.create_task(self._reconciler_loop(RECONCILE_INTERVAL_SEC))
         
     async def stop(self):
         self._closing.set()
@@ -329,14 +331,16 @@ class MarketMaker:
         for order in orphan_orders:
             await self._safe_cancel(order_id=order.id, external_id=order.external_id)
 
-    async def _reconciler_loop(self, interval_sec: float = 15.0):
+    async def _reconcile_once(self):
+        try:
+            missing, orphans = await self.detect_reconcile()
+            await self.reconcile(missing, orphans)
+        except Exception as e:
+            print(f"[reconcile] error: {e}")
+
+    async def _reconciler_loop(self, interval_sec: float = RECONCILE_INTERVAL_SEC):
         while not self._closing.is_set():
-            try:
-                missing, orphans = await self.detect_reconcile()
-                await self.reconcile(missing, orphans)
-            except Exception as e:
-                # keep going; log if you have a logger
-                print(f"[reconcile] error: {e}")
+            await self._reconcile_once()
             await asyncio.sleep(interval_sec)
 
     
@@ -437,6 +441,7 @@ class MarketMaker:
                 return
             else:
                 print("Place/replace failed:\n", traceback.format_exc())
+                asyncio.create_task(self._reconcile_once())
 
                 # Après un échec, vérifie si l’ordre a quand même été créé
                 try:

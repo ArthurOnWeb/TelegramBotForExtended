@@ -12,7 +12,7 @@ It keeps *N* quotes on both sides of the book, replaces them as the best bid/ask
 * Places and maintains symmetric quotes around best bid/ask
 * Maker‑only (`post_only=True`) replaces, with fallback to fresh create on edit failure
 * Token‑bucket **rate limiter** + in‑flight **semaphore** throttle
-* Background **reconciler** cleans ghosts & cancels server orphans
+* Background **reconciler** (default 5s, configurable) cleans ghosts & cancels server orphans
 * Graceful shutdown (SIGINT/SIGTERM): mass‑cancel + close sockets
 * Works with the X10 Python SDK (`BlockingTradingClient` + `OrderBook`)
 
@@ -29,7 +29,7 @@ It keeps *N* quotes on both sides of the book, replaces them as the best bid/ask
 
    * Replace existing order using `previous_order_external_id`
    * If server responds **“Edit order not found”** (code `1142`), send a **fresh create** (no previous)
-4. A background **reconciler** every 15s:
+4. A background **reconciler** every 5s (tweak via `MM_RECONCILE_INTERVAL`):
 
    * Frees local slots for orders that disappeared server‑side
    * Cancels **server orphans** (orders with our prefix not tracked locally)
@@ -99,6 +99,9 @@ MM_OFFSET_DIVISOR=400
 
 # Max concurrent in-flight order requests
 MM_MAX_IN_FLIGHT=4
+
+# Reconciliation interval in seconds (lower = catch duplicates sooner)
+MM_RECONCILE_INTERVAL=5
 
 # --- Rate limiting (token bucket) ---
 # Set MM_MARKET_MAKER=1 if you have the MM whitelist (higher exchange limits)
@@ -180,7 +183,7 @@ You can always lower RPS if you see `429`.
 
 ### Orders vanish but terminal shows nothing
 
-* Reconcile runs every 15s and will free slots / cancel orphans.
+* Reconcile runs every 5s and will free slots / cancel orphans.
 * Ensure the SDK’s internal stream is healthy; add logging if needed.
 
 ---

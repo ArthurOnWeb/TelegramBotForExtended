@@ -15,15 +15,27 @@ from x10.perpetual.simple_client.simple_trading_client import BlockingTradingCli
 from account import TradingAccount
 from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
-from id_generator import SqliteExternalIdGenerator
+from id_generator import uuid_external_id
 from utils import logger
 
 
 # --- Paramètres de prod (surcouchables par variables d'env) ---
 MARKET_NAME = os.getenv("MM_MARKET") or input("Market ? ")
 
-# Path to persist external IDs using SQLite for multi-process safety
+# Path used by the legacy SQLite-based external ID generator
 ID_DB_PATH = Path(__file__).with_name(f"external_ids_{MARKET_NAME}.db")
+
+
+def _migrate_legacy_id_store(path: Path) -> None:
+    """Rename any leftover SQLite file from the previous ID generator."""
+    if path.exists():
+        backup = path.with_suffix(path.suffix + ".bak")
+        path.rename(backup)
+        logger.info("Legacy external ID database found; moved to %s", backup)
+
+
+# Perform migration at import time so each run cleans up old files
+_migrate_legacy_id_store(ID_DB_PATH)
 
 LEVELS_PER_SIDE = int(os.getenv("MM_LEVELS", "2"))        # nombre de quotes par côté
 TARGET_ORDER_USD = Decimal(os.getenv("MM_TARGET_USD", "250"))
@@ -67,9 +79,6 @@ class MarketMaker:
         # Stores a tuple of (size, side, timestamp)
         self._pos_cache: tuple[Decimal, str, float] = (Decimal(0), "", 0.0)
         self._pos_ttl = 2.0  # seconds
-
-        # External-id generator backed by SQLite
-        self._id_generator = SqliteExternalIdGenerator(ID_DB_PATH)
 
         # Serialize order placement to avoid concurrent create/replace calls
         self._placement_lock = asyncio.Lock()
@@ -388,7 +397,7 @@ class MarketMaker:
             return
 
         # Nouveau external_id (remplacement via previous_order_external_id)
-        new_external_id = self._id_generator.next_id(
+        new_external_id = uuid_external_id(
             self.MM_PREFIX, side.name.lower(), idx
         )
 

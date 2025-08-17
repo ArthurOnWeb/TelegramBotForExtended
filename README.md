@@ -45,6 +45,18 @@ src/
   account.py            # loads keys, builds TradingAccount & clients
   rate_limit.py         # token-bucket limiter
   backoff_utils.py      # retry with exponential backoff
+  services/orderbook.py # lightweight order book watcher
+```
+
+Example of the order book watcher:
+
+```python
+from services.orderbook import OrderBookWatcher
+
+watcher = OrderBookWatcher("BTC-USD")
+await watcher.start()
+print(watcher.get_best_bid(), watcher.get_best_ask())
+await watcher.stop()  # release network resources
 ```
 
 ---

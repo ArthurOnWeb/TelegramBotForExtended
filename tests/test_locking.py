@@ -119,3 +119,22 @@ async def test_reconcile_updates_slots_under_lock():
 
     assert mm._buy_slots[0].external_id is None
     assert events == ["enter", "exit"]
+
+
+@pytest.mark.asyncio
+async def test_detect_reconcile_marks_price_drift_order():
+    drift_order = types.SimpleNamespace(
+        external_id="mm_1", price=Decimal("2"), id=1
+    )
+
+    async def fake_get_open_orders(market_names):
+        return types.SimpleNamespace(data=[drift_order])
+
+    mm = MarketMaker(DummyAccount(fake_get_open_orders), "BTC")
+    mm._market = types.SimpleNamespace(name="BTC")
+    mm._buy_slots = [Slot("mm_1", Decimal("1"))]
+
+    missing, orphans = await mm.detect_reconcile()
+
+    assert missing == [(mm._buy_slots, 0)]
+    assert orphans == [drift_order]

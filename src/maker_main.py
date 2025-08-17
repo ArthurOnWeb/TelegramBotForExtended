@@ -326,6 +326,7 @@ class MarketMaker:
                 slots, i, slot = info
                 key = (id(slots), i)
                 if slot.price is not None and order.price != slot.price and key not in seen:
+                    orphan_orders.append(order)
                     missing_slots.append((slots, i))
                     seen.add(key)
 

@@ -48,6 +48,8 @@ MAX_IN_FLIGHT = int(os.getenv("MM_MAX_IN_FLIGHT", "4"))
 EXPOSURE_SKEW = Decimal(os.getenv("MM_EXPOSURE_SKEW", "0"))
 # Interval for background reconciliation (seconds)
 RECONCILE_INTERVAL_SEC = float(os.getenv("MM_RECONCILE_INTERVAL", "5"))
+# Allowed excess open orders before triggering a full purge
+OPEN_ORDERS_MARGIN = int(os.getenv("MM_OPEN_ORDERS_MARGIN", "0"))
 
 # Périodicité de vérification de l'ordre book et âge max (en secondes)
 REFRESH_INTERVAL_SEC = float(os.getenv("MM_REFRESH_INTERVAL", "5"))
@@ -265,21 +267,23 @@ class MarketMaker:
         s = str(e)
         return "Edit order not found" in s or '"code":1142' in s or "code\": 1142" in s
 
-    async def detect_reconcile(self) -> tuple[list[tuple[list[Slot], int]], list]:
+    async def detect_reconcile(self) -> tuple[list[tuple[list[Slot], int]], list, list]:
         """
         Gather server-side open orders and detect discrepancies with local slots.
 
-        Returns a tuple ``(missing_slots, orphan_orders)`` where:
+        Returns a tuple ``(missing_slots, orphan_orders, open_orders)`` where:
           * ``missing_slots`` is a list of ``(slots_list, index)`` pairs for local
             slots that no longer have a corresponding server order or whose server
             price has drifted.
           * ``orphan_orders`` is a list of server orders to cancel, including
             orders lacking an external ID or MM orders not tracked locally.
+          * ``open_orders`` is the full list of server-side open orders for the
+            market.
 
         This detection step performs no order creation or cancellation.
         """
         if not self._market:
-            return [], []
+            return [], [], []
 
         async_client = self.account.get_async_client()
         resp = await call_with_retries(
@@ -336,7 +340,7 @@ class MarketMaker:
             if ext not in local_exts:
                 orphan_orders.append(order)
 
-        return missing_slots, orphan_orders
+        return missing_slots, orphan_orders, open_orders
 
     async def reconcile(self, missing_slots: list[tuple[list[Slot], int]], orphan_orders: list):
         """
@@ -356,8 +360,25 @@ class MarketMaker:
 
     async def _reconcile_once(self):
         try:
-            missing, orphans = await self.detect_reconcile()
-            await self.reconcile(missing, orphans)
+            missing, orphans, open_orders = await self.detect_reconcile()
+            open_count = len(open_orders)
+            max_allowed = 2 * LEVELS_PER_SIDE + OPEN_ORDERS_MARGIN
+            if open_count > max_allowed:
+                logger.warning(
+                    "Too many open orders (%d > %d); purging all",
+                    open_count,
+                    max_allowed,
+                )
+                await call_with_retries(
+                    lambda: self.client.mass_cancel(markets=[self._market.name]),
+                    limiter=self._limiter,
+                )
+                async with self._placement_lock:
+                    for slots in (self._buy_slots, self._sell_slots):
+                        for i in range(LEVELS_PER_SIDE):
+                            slots[i] = Slot(None, None)
+            else:
+                await self.reconcile(missing, orphans)
         except Exception as e:
             print(f"[reconcile] error: {e}")
 

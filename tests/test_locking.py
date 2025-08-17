@@ -134,7 +134,8 @@ async def test_detect_reconcile_marks_price_drift_order():
     mm._market = types.SimpleNamespace(name="BTC")
     mm._buy_slots = [Slot("mm_1", Decimal("1"))]
 
-    missing, orphans = await mm.detect_reconcile()
+    missing, orphans, open_orders = await mm.detect_reconcile()
 
     assert missing == [(mm._buy_slots, 0)]
     assert orphans == [drift_order]
+    assert open_orders == [drift_order]

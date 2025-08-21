@@ -8,14 +8,36 @@ from x10.perpetual.configuration import STARKNET_MAINNET_CONFIG
 
 load_dotenv()
 
+
+def _require_env_vars() -> tuple[str, str, str, str]:
+    """Fetch and validate required environment variables."""
+
+    api_key = os.getenv("API_KEY")
+    public_key = os.getenv("PUBLIC_KEY")
+    private_key = os.getenv("PRIVATE_KEY")
+    vault = os.getenv("VAULT")
+
+    if not api_key:
+        raise RuntimeError("Environment variable 'API_KEY' is missing or empty")
+    if not public_key:
+        raise RuntimeError("Environment variable 'PUBLIC_KEY' is missing or empty")
+    if not private_key:
+        raise RuntimeError("Environment variable 'PRIVATE_KEY' is missing or empty")
+    if not vault:
+        raise RuntimeError("Environment variable 'VAULT' is missing or empty")
+
+    return api_key, public_key, private_key, vault
+
 class TradingAccount:
     def __init__(self):
+        api_key, public_key, private_key, vault = _require_env_vars()
+
         self.endpoint_config = STARKNET_MAINNET_CONFIG
 
-        self.api_key = os.getenv("API_KEY")
-        self.public_key = os.getenv("PUBLIC_KEY")
-        self.private_key = os.getenv("PRIVATE_KEY")
-        self.vault = int(os.getenv("VAULT"))
+        self.api_key = api_key
+        self.public_key = public_key
+        self.private_key = private_key
+        self.vault = int(vault)
 
         self.stark_account = StarkPerpetualAccount(
             vault=self.vault,

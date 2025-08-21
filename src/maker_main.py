@@ -208,11 +208,11 @@ class MarketMaker:
             return base_amount
 
         exposure, pos_side = await self._get_position_value()
-        if exposure <= 500:
+        if exposure <= 0:
             return base_amount
 
         reducing_exposure = (
-            (pos_side == "LONG" and side == OrderSide.SELL)
+            (pos_side == "LONG" and side == OrderSide.SELL and exposure >=1000)
             or (pos_side == "SHORT" and side == OrderSide.BUY)
         )
         if not reducing_exposure:

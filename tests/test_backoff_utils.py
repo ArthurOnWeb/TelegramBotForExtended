@@ -36,3 +36,53 @@ async def test_retry_on_timeout():
         await backoff_utils.call_with_retries(op, limiter=limiter, max_attempts=3, base_delay=0.01)
 
     assert attempts == 3
+
+
+class StatusError(Exception):
+    def __init__(self, code):
+        super().__init__("boom")
+        self.status_code = code
+
+
+@pytest.mark.asyncio
+async def test_retry_on_429_status_code():
+    backoff_utils = _reload_module()
+    attempts = 0
+
+    async def op():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise StatusError(429)
+        return "ok"
+
+    class DummyLimiter:
+        async def acquire(self):
+            pass
+
+    limiter = DummyLimiter()
+    result = await backoff_utils.call_with_retries(op, limiter=limiter, max_attempts=2, base_delay=0.01)
+    assert result == "ok"
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_on_5xx_status_code():
+    backoff_utils = _reload_module()
+    attempts = 0
+
+    async def op():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 2:
+            raise StatusError(503)
+        return "ok"
+
+    class DummyLimiter:
+        async def acquire(self):
+            pass
+
+    limiter = DummyLimiter()
+    result = await backoff_utils.call_with_retries(op, limiter=limiter, max_attempts=3, base_delay=0.01)
+    assert result == "ok"
+    assert attempts == 2

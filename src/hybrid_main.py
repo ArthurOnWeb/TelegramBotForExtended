@@ -22,6 +22,7 @@ from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Deque, Optional
+import time
 
 from x10.perpetual.orderbook import OrderBook
 from x10.perpetual.orders import OrderSide
@@ -29,6 +30,8 @@ from x10.perpetual.simple_client.simple_trading_client import BlockingTradingCli
 
 from account import TradingAccount
 from rate_limit import build_rate_limiter
+from backoff_utils import call_with_retries
+from id_generator import uuid_external_id
 from utils import logger
 
 # --- Configuration ----------------------------------------------------------------------
@@ -46,6 +49,22 @@ REFRESH_INTERVAL_SEC = float(os.getenv("HYB_REFRESH_INTERVAL", "1"))
 
 # Derived: number of mid prices to keep (sampled every REFRESH_INTERVAL_SEC)
 PRICE_HISTORY_LEN = max(1, int(VOL_WINDOW_SEC / REFRESH_INTERVAL_SEC))
+
+# --- Trading parameters --------------------------------------------------------------
+
+# Size of passive maker orders in USD notional
+MAKER_ORDER_USD = Decimal(os.getenv("HYB_MAKER_USD", "50"))
+# Size of taker scalp orders in USD notional
+SCALP_ORDER_USD = Decimal(os.getenv("HYB_SCALP_USD", "25"))
+# Maximum absolute inventory allowed (USD value)
+MAX_POSITION_USD = Decimal(os.getenv("HYB_MAX_POSITION_USD", "250"))
+# Maker quoting offset from mid-price (relative, e.g. 0.0005 = 5 bps)
+MAKER_SPREAD = Decimal(os.getenv("HYB_MAKER_SPREAD", "0.0005"))
+# Reprice threshold for existing maker orders
+REPRICE_BPS = Decimal(os.getenv("HYB_REPRICE_BPS", "0.0002"))
+# Stop-loss and take-profit distance (fraction of entry price)
+STOP_BPS = Decimal(os.getenv("HYB_STOP_BPS", "0.001"))
+TARGET_BPS = Decimal(os.getenv("HYB_TARGET_BPS", "0.0015"))
 
 
 @dataclass
@@ -82,6 +101,12 @@ class HybridTrader:
         self._mid_history: Deque[float] = deque(maxlen=PRICE_HISTORY_LEN)
         self._mode: str = "calm"
         self._open_trade: Optional[Trade] = None
+
+        # Track outstanding maker orders
+        self._mm_buy_id: Optional[str] = None
+        self._mm_buy_price: Optional[Decimal] = None
+        self._mm_sell_id: Optional[str] = None
+        self._mm_sell_price: Optional[Decimal] = None
 
         self._regime_task: asyncio.Task | None = None
         self._trade_task: asyncio.Task | None = None
@@ -157,6 +182,47 @@ class HybridTrader:
         var = sum((r - mean) ** 2 for r in rets) / len(rets)
         return var ** 0.5
 
+    async def _safe_cancel(self, *, order_id: int | None = None, external_id: str | None = None) -> None:
+        """Cancel an order while tolerating already-cancelled errors."""
+
+        async def _op():
+            if external_id is not None:
+                return await self.client.cancel_order(order_external_id=external_id)
+            return await self.client.cancel_order(order_id=order_id)
+
+        try:
+            await call_with_retries(_op, limiter=self._limiter)
+        except Exception as e:  # noqa: PERF203 - broad catch to log
+            msg = str(e).lower()
+            if "not found" in msg:
+                return
+            logger.warning("cancel failed: %s", e)
+
+    async def _get_signed_position(self) -> Decimal:
+        """Return current position value (long positive, short negative)."""
+
+        async_client = self.account.get_async_client()
+        try:
+            resp = await call_with_retries(
+                lambda: async_client.account.get_positions(market_names=[self._market.name]),
+                limiter=self._limiter,
+            )
+        except Exception as e:  # noqa: PERF203
+            logger.warning("position fetch failed: %s", e)
+            return Decimal(0)
+
+        positions = getattr(resp, "data", None) or []
+        if not positions:
+            return Decimal(0)
+        pos = positions[0]
+        value = Decimal(getattr(pos, "value", 0))
+        side = getattr(pos, "side", "").lower()
+        if side.startswith("long") or side.startswith("buy"):
+            return value
+        if side.startswith("short") or side.startswith("sell"):
+            return -value
+        return Decimal(0)
+
     # ------------------------------------------------------------------
     async def _trading_loop(self) -> None:
         """Dispatch to the appropriate mode's trading function."""
@@ -168,36 +234,185 @@ class HybridTrader:
             await asyncio.sleep(REFRESH_INTERVAL_SEC)
 
     async def _market_make(self) -> None:
-        """Very small placeholder for passive quoting logic."""
+        """Place passive quotes while respecting inventory limits."""
+
         bid = getattr(self._order_book, "best_bid", None)
         ask = getattr(self._order_book, "best_ask", None)
         if not (bid and ask):
             return
+
         mid = (Decimal(bid.price) + Decimal(ask.price)) / 2
-        logger.debug("[MM] quoting around mid %s", mid)
-        # Actual order placement/cancellation should be implemented here.
+        pos = await self._get_signed_position()
+
+        buy_allowed = pos < MAX_POSITION_USD
+        sell_allowed = -pos < MAX_POSITION_USD
+
+        # Cancel sides that would exceed inventory
+        if not buy_allowed and self._mm_buy_id:
+            await self._safe_cancel(external_id=self._mm_buy_id)
+            self._mm_buy_id = None
+            self._mm_buy_price = None
+        if not sell_allowed and self._mm_sell_id:
+            await self._safe_cancel(external_id=self._mm_sell_id)
+            self._mm_sell_id = None
+            self._mm_sell_price = None
+
+        qty = MAKER_ORDER_USD / mid if mid else Decimal(0)
+
+        if buy_allowed:
+            price = mid * (1 - MAKER_SPREAD)
+            # Reprice if moved
+            if self._mm_buy_id and self._mm_buy_price:
+                diff = abs(price - self._mm_buy_price) / self._mm_buy_price
+                if diff > REPRICE_BPS:
+                    await self._safe_cancel(external_id=self._mm_buy_id)
+                    self._mm_buy_id = None
+                    self._mm_buy_price = None
+            if self._mm_buy_id is None:
+                ext_id = uuid_external_id("hyb_mm", "buy")
+                async def _op():
+                    return await self.client.create_order(
+                        market=self._market.name,
+                        side=OrderSide.BUY,
+                        order_type="limit",
+                        size=qty,
+                        price=price,
+                        time_in_force="GTC",
+                        external_id=ext_id,
+                    )
+                try:
+                    await call_with_retries(_op, limiter=self._limiter)
+                    self._mm_buy_id = ext_id
+                    self._mm_buy_price = price
+                except Exception as e:  # noqa: PERF203
+                    logger.warning("[MM] buy order failed: %s", e)
+
+        if sell_allowed:
+            price = mid * (1 + MAKER_SPREAD)
+            if self._mm_sell_id and self._mm_sell_price:
+                diff = abs(price - self._mm_sell_price) / self._mm_sell_price
+                if diff > REPRICE_BPS:
+                    await self._safe_cancel(external_id=self._mm_sell_id)
+                    self._mm_sell_id = None
+                    self._mm_sell_price = None
+            if self._mm_sell_id is None:
+                ext_id = uuid_external_id("hyb_mm", "sell")
+                async def _op():
+                    return await self.client.create_order(
+                        market=self._market.name,
+                        side=OrderSide.SELL,
+                        order_type="limit",
+                        size=qty,
+                        price=price,
+                        time_in_force="GTC",
+                        external_id=ext_id,
+                    )
+                try:
+                    await call_with_retries(_op, limiter=self._limiter)
+                    self._mm_sell_id = ext_id
+                    self._mm_sell_price = price
+                except Exception as e:  # noqa: PERF203
+                    logger.warning("[MM] sell order failed: %s", e)
 
     async def _scalp_momentum(self) -> None:
-        """Placeholder for taker-style momentum scalping."""
-        if self._open_trade:
-            # Manage existing trade (e.g. trailing stop); omitted for brevity
-            return
+        """Execute momentum trades with stop and target management."""
 
         bid = getattr(self._order_book, "best_bid", None)
         ask = getattr(self._order_book, "best_ask", None)
         if not (bid and ask):
             return
+
         mid = (Decimal(bid.price) + Decimal(ask.price)) / 2
+
+        # Manage open trade first
+        if self._open_trade:
+            trade = self._open_trade
+            if trade.side == OrderSide.BUY and bid:
+                price = Decimal(bid.price)
+                if price <= trade.stop or price >= trade.target:
+                    await self._close_trade(trade)
+            elif trade.side == OrderSide.SELL and ask:
+                price = Decimal(ask.price)
+                if price >= trade.stop or price <= trade.target:
+                    await self._close_trade(trade)
+            return
+
         vwap = (
             sum(self._mid_history) / len(self._mid_history)
             if self._mid_history
             else float(mid)
         )
+
+        side: OrderSide | None = None
         if mid > vwap:
-            logger.debug("[SCALP] breakout long at %s", mid)
+            side = OrderSide.BUY
         elif mid < vwap:
-            logger.debug("[SCALP] breakout short at %s", mid)
-        # Real order submission and risk management to be added.
+            side = OrderSide.SELL
+        else:
+            return
+
+        pos = await self._get_signed_position()
+        if side == OrderSide.BUY and pos >= MAX_POSITION_USD:
+            return
+        if side == OrderSide.SELL and -pos >= MAX_POSITION_USD:
+            return
+
+        qty = SCALP_ORDER_USD / mid if mid else Decimal(0)
+        ext_id = uuid_external_id("hyb_scalp", side.name.lower())
+
+        async def _op():
+            return await self.client.create_order(
+                market=self._market.name,
+                side=side,
+                order_type="market",
+                size=qty,
+                external_id=ext_id,
+            )
+
+        try:
+            await call_with_retries(_op, limiter=self._limiter)
+        except Exception as e:  # noqa: PERF203
+            logger.warning("[SCALP] open trade failed: %s", e)
+            return
+
+        if side == OrderSide.BUY:
+            stop = mid * (1 - STOP_BPS)
+            target = mid * (1 + TARGET_BPS)
+        else:
+            stop = mid * (1 + STOP_BPS)
+            target = mid * (1 - TARGET_BPS)
+
+        self._open_trade = Trade(
+            side=side,
+            entry=mid,
+            stop=stop,
+            target=target,
+            opened_at=time.time(),
+        )
+
+    async def _close_trade(self, trade: Trade) -> None:
+        """Close an open trade with a market order."""
+
+        exit_side = OrderSide.SELL if trade.side == OrderSide.BUY else OrderSide.BUY
+        qty = SCALP_ORDER_USD / trade.entry if trade.entry else Decimal(0)
+        ext_id = uuid_external_id("hyb_exit", exit_side.name.lower())
+
+        async def _op():
+            return await self.client.create_order(
+                market=self._market.name,
+                side=exit_side,
+                order_type="market",
+                size=qty,
+                external_id=ext_id,
+            )
+
+        try:
+            await call_with_retries(_op, limiter=self._limiter)
+        except Exception as e:  # noqa: PERF203
+            logger.warning("[SCALP] failed to exit trade: %s", e)
+            return
+
+        self._open_trade = None
 
 
 # ----------------------------------------------------------------------------------------

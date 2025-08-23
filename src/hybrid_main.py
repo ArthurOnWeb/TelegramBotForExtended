@@ -33,6 +33,7 @@ from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
 from id_generator import uuid_external_id
 from utils import logger
+from regime.calibration import VolatilityCalibrator
 
 # --- Configuration ----------------------------------------------------------------------
 
@@ -40,7 +41,9 @@ from utils import logger
 MARKET_NAME = os.getenv("HYB_MARKET") or input("Market ? ")
 
 # Regime detection parameters
-SIGMA_THRESHOLD = float(os.getenv("HYB_SIGMA_THRESHOLD", "0.0012"))  # 0.12 %
+# ``DEFAULT_SIGMA_THRESHOLD`` is used as a fallback until enough observations are
+# collected to compute a dynamic threshold.
+DEFAULT_SIGMA_THRESHOLD = float(os.getenv("HYB_SIGMA_THRESHOLD", "0.0012"))  # 0.12 %
 MIN_SPREAD = float(os.getenv("HYB_MIN_SPREAD", "0.0005"))
 VOL_WINDOW_SEC = int(os.getenv("HYB_VOL_WINDOW_SEC", "300"))
 
@@ -82,9 +85,11 @@ class HybridTrader:
     """Regime-switching trading bot.
 
     The trader maintains a short history of mid-prices to estimate realised
-    volatility.  When volatility is below ``SIGMA_THRESHOLD`` and spreads are
-    not too tight, it engages in passive market making.  Otherwise it will
-    try to capture short bursts of momentum using taker orders.
+    volatility.  A :class:`~regime.calibration.VolatilityCalibrator` keeps track
+    of these measurements to derive a dynamic calm/agitated threshold (20th
+    percentile).  When volatility is below this threshold and spreads are not
+    too tight, it engages in passive market making.  Otherwise it will try to
+    capture short bursts of momentum using taker orders.
     """
 
     def __init__(self, account: TradingAccount, market_name: str):
@@ -101,6 +106,9 @@ class HybridTrader:
         self._mid_history: Deque[float] = deque(maxlen=PRICE_HISTORY_LEN)
         self._mode: str = "calm"
         self._open_trade: Optional[Trade] = None
+
+        # Volatility calibration
+        self._calibrator = VolatilityCalibrator()
 
         # Track outstanding maker orders
         self._mm_buy_id: Optional[str] = None
@@ -156,8 +164,14 @@ class HybridTrader:
                 spread = float("inf")
 
             sigma = self._realised_vol()
+            # Update calibration with latest 5min volatility estimate
+            self._calibrator.update(self.market_name, sigma)
+            threshold = self._calibrator.threshold(self.market_name)
+            if threshold == 0.0:
+                threshold = DEFAULT_SIGMA_THRESHOLD
+
             mode = "calm"
-            if sigma > SIGMA_THRESHOLD or spread < MIN_SPREAD:
+            if sigma > threshold or spread < MIN_SPREAD:
                 mode = "agitated"
             if mode != self._mode:
                 logger.info(

@@ -34,6 +34,7 @@ from backoff_utils import call_with_retries
 from id_generator import uuid_external_id
 from utils import logger
 from regime.calibration import VolatilityCalibrator
+from strategy.quoting import Quoter
 
 # --- Configuration ----------------------------------------------------------------------
 
@@ -68,6 +69,13 @@ REPRICE_BPS = Decimal(os.getenv("HYB_REPRICE_BPS", "0.0002"))
 # Stop-loss and take-profit distance (fraction of entry price)
 STOP_BPS = Decimal(os.getenv("HYB_STOP_BPS", "0.001"))
 TARGET_BPS = Decimal(os.getenv("HYB_TARGET_BPS", "0.0015"))
+
+# Default regression coefficients for quoting parameters.
+# ``beta_k`` intercept matches ``MAKER_SPREAD`` so behaviour remains unchanged
+# until a calibration routine provides better estimates.  ``beta_lambda`` is
+# initialised so the returned lambda_ scales the order size by 1.0.
+DEFAULT_BETA_K = [0.0, 0.0, float(MAKER_SPREAD)]
+DEFAULT_BETA_LAMBDA = [0.0, 0.0, 1.0]
 
 
 @dataclass
@@ -110,6 +118,11 @@ class HybridTrader:
         # Volatility calibration
         self._calibrator = VolatilityCalibrator()
 
+        # Quoting helper updating k and lambda parameters from market state
+        self._quoter: Quoter | None = None
+        self._k: float = float(MAKER_SPREAD)
+        self._lambda_: float = 1.0
+
         # Track outstanding maker orders
         self._mm_buy_id: Optional[str] = None
         self._mm_buy_price: Optional[Decimal] = None
@@ -130,6 +143,13 @@ class HybridTrader:
         # Order book used for both quoting and regime detection
         self._order_book = await OrderBook.create(
             self._endpoint_config, market_name=self._market.name, start=True
+        )
+
+        # Instantiate quoter with current order book
+        self._quoter = Quoter(
+            self._order_book,
+            DEFAULT_BETA_K,
+            DEFAULT_BETA_LAMBDA,
         )
 
         self._regime_task = asyncio.create_task(self._regime_loop())
@@ -164,6 +184,8 @@ class HybridTrader:
                 spread = float("inf")
 
             sigma = self._realised_vol()
+            if self._quoter:
+                self._k, self._lambda_ = self._quoter.refresh_parameters(sigma)
             # Update calibration with latest 5min volatility estimate
             self._calibrator.update(self.market_name, sigma)
             threshold = self._calibrator.threshold(self.market_name)
@@ -271,10 +293,12 @@ class HybridTrader:
             self._mm_sell_id = None
             self._mm_sell_price = None
 
-        qty = MAKER_ORDER_USD / mid if mid else Decimal(0)
+        size_usd = MAKER_ORDER_USD * Decimal(self._lambda_) if self._lambda_ else MAKER_ORDER_USD
+        qty = size_usd / mid if mid else Decimal(0)
 
         if buy_allowed:
-            price = mid * (1 - MAKER_SPREAD)
+            spread = Decimal(self._k) if self._k else MAKER_SPREAD
+            price = mid * (1 - spread)
             # Reprice if moved
             if self._mm_buy_id and self._mm_buy_price:
                 diff = abs(price - self._mm_buy_price) / self._mm_buy_price
@@ -302,7 +326,8 @@ class HybridTrader:
                     logger.warning("[MM] buy order failed: %s", e)
 
         if sell_allowed:
-            price = mid * (1 + MAKER_SPREAD)
+            spread = Decimal(self._k) if self._k else MAKER_SPREAD
+            price = mid * (1 + spread)
             if self._mm_sell_id and self._mm_sell_price:
                 diff = abs(price - self._mm_sell_price) / self._mm_sell_price
                 if diff > REPRICE_BPS:

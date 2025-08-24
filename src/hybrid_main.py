@@ -259,10 +259,40 @@ class HybridTrader:
             return -value
         return Decimal(0)
 
+    async def _check_mm_fills(self) -> None:
+        """Update state of passive maker orders if filled or cancelled."""
+
+        if not self._market:
+            return
+
+        if not (self._mm_buy_id or self._mm_sell_id):
+            return
+
+        async_client = self.account.get_async_client()
+
+        try:
+            resp = await call_with_retries(
+                lambda: async_client.account.get_open_orders(market_names=[self._market.name]),
+                limiter=self._limiter,
+            )
+            open_ids = {o.external_id for o in (resp.data or [])}
+        except Exception as e:  # noqa: PERF203 - broad catch to log
+            logger.warning("[MM] check orders failed: %s", e)
+            return
+
+        if self._mm_buy_id and self._mm_buy_id not in open_ids:
+            self._mm_buy_id = None
+            self._mm_buy_price = None
+
+        if self._mm_sell_id and self._mm_sell_id not in open_ids:
+            self._mm_sell_id = None
+            self._mm_sell_price = None
+
     # ------------------------------------------------------------------
     async def _trading_loop(self) -> None:
         """Dispatch to the appropriate mode's trading function."""
         while not self._closing.is_set():
+            await self._check_mm_fills()
             if self._mode == "calm":
                 await self._market_make()
             else:
@@ -271,6 +301,8 @@ class HybridTrader:
 
     async def _market_make(self) -> None:
         """Place passive quotes while respecting inventory limits."""
+
+        await self._check_mm_fills()
 
         bid = getattr(self._order_book, "best_bid", None)
         ask = getattr(self._order_book, "best_ask", None)

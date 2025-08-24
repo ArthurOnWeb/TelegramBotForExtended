@@ -68,8 +68,8 @@ async def _run() -> None:
 
     try:
         while True:
-            bid = getattr(orderbook, "best_bid", None)
-            ask = getattr(orderbook, "best_ask", None)
+            bid = orderbook.best_bid()
+            ask = orderbook.best_ask()
             if bid and ask:
                 mid = float((bid.price + ask.price) / 2)
                 mid_history.append(mid)
@@ -81,7 +81,7 @@ async def _run() -> None:
                 logger.info("sigma=%.5f threshold=%.5f", sigma, threshold)
             await asyncio.sleep(REFRESH_INTERVAL_SEC)
     finally:
-        await orderbook.close()
+        orderbook.stop_orderbook()
 
 
 # ----------------------------------------------------------------------------

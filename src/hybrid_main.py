@@ -293,11 +293,24 @@ class HybridTrader:
         """Dispatch to the appropriate mode's trading function."""
         while not self._closing.is_set():
             await self._check_mm_fills()
+            distance = self._distance_to_entry()
+            logger.info("mode=%s distance_to_entry=%.5f", self._mode, distance)
             if self._mode == "calm":
                 await self._market_make()
             else:
                 await self._scalp_momentum()
             await asyncio.sleep(REFRESH_INTERVAL_SEC)
+
+    def _distance_to_entry(self) -> float:
+        """Return relative distance of mid price from VWAP for entry."""
+
+        if not self._mid_history:
+            return 0.0
+        mid = self._mid_history[-1]
+        vwap = sum(self._mid_history) / len(self._mid_history)
+        if vwap == 0:
+            return 0.0
+        return mid / vwap - 1
 
     async def _market_make(self) -> None:
         """Place passive quotes while respecting inventory limits."""

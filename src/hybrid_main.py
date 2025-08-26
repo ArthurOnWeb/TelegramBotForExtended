@@ -70,6 +70,12 @@ REPRICE_BPS = Decimal(os.getenv("HYB_REPRICE_BPS", "0.0002"))
 STOP_BPS = Decimal(os.getenv("HYB_STOP_BPS", "0.001"))
 TARGET_BPS = Decimal(os.getenv("HYB_TARGET_BPS", "0.0015"))
 
+# Multi-level market making parameters
+MAKER_LEVELS = int(os.getenv("HYB_MM_LEVELS", "1"))
+MAKER_DELTA = float(os.getenv("HYB_MM_DELTA", "0.0005"))
+MM_EPSILON = float(os.getenv("HYB_MM_EPSILON", "1.0"))
+MM_MAX_AGE_SEC = float(os.getenv("HYB_MM_MAX_AGE", "30"))
+
 # Default regression coefficients for quoting parameters.
 # ``beta_k`` intercept matches ``MAKER_SPREAD`` so behaviour remains unchanged
 # until a calibration routine provides better estimates.  ``beta_lambda`` is
@@ -133,11 +139,15 @@ class HybridTrader:
         gamma_str = os.getenv(f"HYB_GAMMA_{market_key}") or str(DEFAULT_GAMMA)
         self._gamma: Decimal = Decimal(gamma_str)
 
-        # Track outstanding maker orders
-        self._mm_buy_id: Optional[str] = None
-        self._mm_buy_price: Optional[Decimal] = None
-        self._mm_sell_id: Optional[str] = None
-        self._mm_sell_price: Optional[Decimal] = None
+        # Market making configuration
+        self._mm_levels = MAKER_LEVELS
+        self._mm_delta = MAKER_DELTA
+        self._mm_epsilon = MM_EPSILON
+        self._mm_max_age = MM_MAX_AGE_SEC
+
+        # Track outstanding maker orders by level
+        self._mm_buy_orders: dict[int, tuple[str, Decimal, float]] = {}
+        self._mm_sell_orders: dict[int, tuple[str, Decimal, float]] = {}
 
         self._regime_task: asyncio.Task | None = None
         self._trade_task: asyncio.Task | None = None
@@ -288,7 +298,7 @@ class HybridTrader:
         if not self._market:
             return
 
-        if not (self._mm_buy_id or self._mm_sell_id):
+        if not (self._mm_buy_orders or self._mm_sell_orders):
             return
 
         async_client = self.account.get_async_client()
@@ -303,13 +313,13 @@ class HybridTrader:
             logger.warning("[MM] check orders failed: %s", e)
             return
 
-        if self._mm_buy_id and self._mm_buy_id not in open_ids:
-            self._mm_buy_id = None
-            self._mm_buy_price = None
+        for level, (ext_id, _, _) in list(self._mm_buy_orders.items()):
+            if ext_id not in open_ids:
+                del self._mm_buy_orders[level]
 
-        if self._mm_sell_id and self._mm_sell_id not in open_ids:
-            self._mm_sell_id = None
-            self._mm_sell_price = None
+        for level, (ext_id, _, _) in list(self._mm_sell_orders.items()):
+            if ext_id not in open_ids:
+                del self._mm_sell_orders[level]
 
     # ------------------------------------------------------------------
     async def _trading_loop(self) -> None:
@@ -384,15 +394,18 @@ class HybridTrader:
         buy_allowed = y < MAX_POSITION_USD
         sell_allowed = -y < MAX_POSITION_USD
 
+        now = time.time()
+        epsilon_sigma = Decimal(self._mm_epsilon * sigma)
+
         # Cancel sides that would exceed inventory
-        if not buy_allowed and self._mm_buy_id:
-            await self._safe_cancel(external_id=self._mm_buy_id)
-            self._mm_buy_id = None
-            self._mm_buy_price = None
-        if not sell_allowed and self._mm_sell_id:
-            await self._safe_cancel(external_id=self._mm_sell_id)
-            self._mm_sell_id = None
-            self._mm_sell_price = None
+        if not buy_allowed:
+            for level, (ext_id, _, _) in list(self._mm_buy_orders.items()):
+                await self._safe_cancel(external_id=ext_id)
+                del self._mm_buy_orders[level]
+        if not sell_allowed:
+            for level, (ext_id, _, _) in list(self._mm_sell_orders.items()):
+                await self._safe_cancel(external_id=ext_id)
+                del self._mm_sell_orders[level]
 
         size_usd = MAKER_ORDER_USD * Decimal(self._lambda_) if self._lambda_ else MAKER_ORDER_USD
         qty = (
@@ -401,63 +414,91 @@ class HybridTrader:
             else Decimal(0)
         )
 
-        bid_px = c * (1 - Decimal(h_bid))
-        ask_px = c * (1 + Decimal(h_ask))
-        if self._tick is not None:
-            bid_px = bid_px.quantize(self._tick, rounding=ROUND_FLOOR)
-            ask_px = ask_px.quantize(self._tick, rounding=ROUND_CEILING)
+        # Compute price ladder
+        bid_prices: list[Decimal] = []
+        ask_prices: list[Decimal] = []
+        for level in range(self._mm_levels):
+            b_off = Decimal(h_bid + level * self._mm_delta)
+            a_off = Decimal(h_ask + level * self._mm_delta)
+            bid_px = c * (1 - b_off)
+            ask_px = c * (1 + a_off)
+            if self._tick is not None:
+                bid_px = bid_px.quantize(self._tick, rounding=ROUND_FLOOR)
+                ask_px = ask_px.quantize(self._tick, rounding=ROUND_CEILING)
+            bid_prices.append(bid_px)
+            ask_prices.append(ask_px)
 
+        # Remove stale buy orders
         if buy_allowed:
-            price = bid_px
-            if self._mm_buy_id and self._mm_buy_price:
-                diff = abs(price - self._mm_buy_price) / self._mm_buy_price
-                if diff > REPRICE_BPS:
-                    await self._safe_cancel(external_id=self._mm_buy_id)
-                    self._mm_buy_id = None
-                    self._mm_buy_price = None
-            if self._mm_buy_id is None:
-                ext_id = uuid_external_id("hyb_mm", "buy")
-                async def _op():
-                    return await self.client.create_and_place_order(
-                        market_name=self._market.name,
-                        amount_of_synthetic=qty,
-                        price=price,
-                        side=OrderSide.BUY,
-                        post_only=True,
-                        external_id=ext_id,
-                    )
-                try:
-                    await call_with_retries(_op, limiter=self._limiter)
-                    self._mm_buy_id = ext_id
-                    self._mm_buy_price = price
-                except Exception as e:  # noqa: PERF203
-                    logger.warning("[MM] buy order failed: %s", e)
+            for level, (ext_id, px, ts) in list(self._mm_buy_orders.items()):
+                if level >= self._mm_levels:
+                    await self._safe_cancel(external_id=ext_id)
+                    del self._mm_buy_orders[level]
+                    continue
+                target = bid_prices[level]
+                diff = abs(target - px) / px if px else Decimal(0)
+                age = now - ts
+                if age > self._mm_max_age or diff > epsilon_sigma:
+                    await self._safe_cancel(external_id=ext_id)
+                    del self._mm_buy_orders[level]
 
+        # Remove stale sell orders
         if sell_allowed:
-            price = ask_px
-            if self._mm_sell_id and self._mm_sell_price:
-                diff = abs(price - self._mm_sell_price) / self._mm_sell_price
-                if diff > REPRICE_BPS:
-                    await self._safe_cancel(external_id=self._mm_sell_id)
-                    self._mm_sell_id = None
-                    self._mm_sell_price = None
-            if self._mm_sell_id is None:
-                ext_id = uuid_external_id("hyb_mm", "sell")
-                async def _op():
-                    return await self.client.create_and_place_order(
-                        market_name=self._market.name,
-                        amount_of_synthetic=qty,
-                        price=price,
-                        side=OrderSide.SELL,
-                        post_only=True,
-                        external_id=ext_id,
-                    )
-                try:
-                    await call_with_retries(_op, limiter=self._limiter)
-                    self._mm_sell_id = ext_id
-                    self._mm_sell_price = price
-                except Exception as e:  # noqa: PERF203
-                    logger.warning("[MM] sell order failed: %s", e)
+            for level, (ext_id, px, ts) in list(self._mm_sell_orders.items()):
+                if level >= self._mm_levels:
+                    await self._safe_cancel(external_id=ext_id)
+                    del self._mm_sell_orders[level]
+                    continue
+                target = ask_prices[level]
+                diff = abs(target - px) / px if px else Decimal(0)
+                age = now - ts
+                if age > self._mm_max_age or diff > epsilon_sigma:
+                    await self._safe_cancel(external_id=ext_id)
+                    del self._mm_sell_orders[level]
+
+        # Place missing buy orders
+        if buy_allowed:
+            for level, price in enumerate(bid_prices):
+                if level not in self._mm_buy_orders:
+                    ext_id = uuid_external_id("hyb_mm", f"buy_{level}")
+
+                    async def _op(price=price, ext_id=ext_id):
+                        return await self.client.create_and_place_order(
+                            market_name=self._market.name,
+                            amount_of_synthetic=qty,
+                            price=price,
+                            side=OrderSide.BUY,
+                            post_only=True,
+                            external_id=ext_id,
+                        )
+
+                    try:
+                        await call_with_retries(_op, limiter=self._limiter)
+                        self._mm_buy_orders[level] = (ext_id, price, time.time())
+                    except Exception as e:  # noqa: PERF203
+                        logger.warning("[MM] buy order failed: %s", e)
+
+        # Place missing sell orders
+        if sell_allowed:
+            for level, price in enumerate(ask_prices):
+                if level not in self._mm_sell_orders:
+                    ext_id = uuid_external_id("hyb_mm", f"sell_{level}")
+
+                    async def _op(price=price, ext_id=ext_id):
+                        return await self.client.create_and_place_order(
+                            market_name=self._market.name,
+                            amount_of_synthetic=qty,
+                            price=price,
+                            side=OrderSide.SELL,
+                            post_only=True,
+                            external_id=ext_id,
+                        )
+
+                    try:
+                        await call_with_retries(_op, limiter=self._limiter)
+                        self._mm_sell_orders[level] = (ext_id, price, time.time())
+                    except Exception as e:  # noqa: PERF203
+                        logger.warning("[MM] sell order failed: %s", e)
 
     async def _scalp_momentum(self) -> None:
         """Execute momentum trades with stop and target management."""

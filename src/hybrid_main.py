@@ -175,8 +175,10 @@ class HybridTrader:
     async def _regime_loop(self) -> None:
         """Continuously evaluate market regime based on recent volatility."""
         while not self._closing.is_set():
-            bid = getattr(self._order_book, "best_bid", None)
-            ask = getattr(self._order_book, "best_ask", None)
+            bid_fn = getattr(self._order_book, "best_bid", None)
+            bid = bid_fn() if bid_fn else None
+            ask_fn = getattr(self._order_book, "best_ask", None)
+            ask = ask_fn() if ask_fn else None
             if bid and ask:
                 mid = float((bid.price + ask.price) / 2)
                 self._mid_history.append(mid)
@@ -322,8 +324,10 @@ class HybridTrader:
 
         await self._check_mm_fills()
 
-        bid = getattr(self._order_book, "best_bid", None)
-        ask = getattr(self._order_book, "best_ask", None)
+        bid_fn = getattr(self._order_book, "best_bid", None)
+        bid = bid_fn() if bid_fn else None
+        ask_fn = getattr(self._order_book, "best_ask", None)
+        ask = ask_fn() if ask_fn else None
         if not (bid and ask):
             return
 
@@ -406,8 +410,10 @@ class HybridTrader:
     async def _scalp_momentum(self) -> None:
         """Execute momentum trades with stop and target management."""
 
-        bid = getattr(self._order_book, "best_bid", None)
-        ask = getattr(self._order_book, "best_ask", None)
+        bid_fn = getattr(self._order_book, "best_bid", None)
+        bid = bid_fn() if bid_fn else None
+        ask_fn = getattr(self._order_book, "best_ask", None)
+        ask = ask_fn() if ask_fn else None
         if not (bid and ask):
             return
 

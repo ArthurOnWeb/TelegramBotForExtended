@@ -145,7 +145,7 @@ class HybridTrader:
             self._endpoint_config, market_name=self._market.name, start=True
         )
 
-        setup_logging(logging.DEBUG)
+        setup_logging(logging.INFO)
         # Instantiate quoter with current order book
         self._quoter = Quoter(
             self._order_book,

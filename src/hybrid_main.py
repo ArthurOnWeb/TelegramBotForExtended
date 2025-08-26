@@ -78,7 +78,7 @@ DEFAULT_BETA_K = [0.0, 0.0, float(MAKER_SPREAD)]
 DEFAULT_BETA_LAMBDA = [0.0, 0.0, 1.0]
 
 # Avellaneda-Stoikov parameters
-GAMMA = Decimal(os.getenv("HYB_GAMMA", "0"))
+DEFAULT_GAMMA = Decimal(os.getenv("HYB_GAMMA", "0"))
 MIN_H = float(os.getenv("HYB_MIN_H", "0"))
 IMBALANCE_LAMBDA = float(os.getenv("HYB_LAMBDA", "0"))
 
@@ -129,6 +129,9 @@ class HybridTrader:
         self._k: float = float(MAKER_SPREAD)
         self._lambda_: float = 1.0
         self._sigma: float = 0.0
+        market_key = market_name.upper().replace("-", "_").replace("/", "_")
+        gamma_str = os.getenv(f"HYB_GAMMA_{market_key}") or str(DEFAULT_GAMMA)
+        self._gamma: Decimal = Decimal(gamma_str)
 
         # Track outstanding maker orders
         self._mm_buy_id: Optional[str] = None
@@ -337,7 +340,12 @@ class HybridTrader:
         return mid / vwap - 1
 
     async def _market_make(self) -> None:
-        """Place passive quotes while respecting inventory limits."""
+        """Place passive quotes while respecting inventory limits.
+
+        Quotes are centred on the microprice shifted by inventory and spreads
+        are skewed so that the side reducing inventory is tightened while the
+        opposite side is widened.
+        """
 
         await self._check_mm_fills()
 
@@ -358,16 +366,23 @@ class HybridTrader:
         microprice = (ask_price * bid_vol + bid_price * ask_vol) / denom
         imbalance = float((bid_vol - ask_vol) / denom)
 
-        pos = await self._get_signed_position()
-        c = microprice - GAMMA * pos
+        y = await self._get_signed_position()
+        c = microprice - self._gamma * y
 
         sigma = self._sigma
         k = self._k if self._k else float(MAKER_SPREAD)
         h = max(MIN_H, k * sigma * (1 + IMBALANCE_LAMBDA * abs(imbalance)))
-        h_dec = Decimal(h)
+        h_bid = h
+        h_ask = h
+        if y > 0:
+            h_bid *= 1.5
+            h_ask *= 0.5
+        elif y < 0:
+            h_bid *= 0.5
+            h_ask *= 1.5
 
-        buy_allowed = pos < MAX_POSITION_USD
-        sell_allowed = -pos < MAX_POSITION_USD
+        buy_allowed = y < MAX_POSITION_USD
+        sell_allowed = -y < MAX_POSITION_USD
 
         # Cancel sides that would exceed inventory
         if not buy_allowed and self._mm_buy_id:
@@ -386,8 +401,8 @@ class HybridTrader:
             else Decimal(0)
         )
 
-        bid_px = c * (1 - h_dec)
-        ask_px = c * (1 + h_dec)
+        bid_px = c * (1 - Decimal(h_bid))
+        ask_px = c * (1 + Decimal(h_ask))
         if self._tick is not None:
             bid_px = bid_px.quantize(self._tick, rounding=ROUND_FLOOR)
             ask_px = ask_px.quantize(self._tick, rounding=ROUND_CEILING)

@@ -32,7 +32,7 @@ from account import TradingAccount
 from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
 from id_generator import uuid_external_id
-from utils import logger,setup_logging
+from utils import logger,setup_logging,logging
 from regime.calibration import VolatilityCalibrator
 from strategy.quoting import Quoter
 

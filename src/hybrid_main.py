@@ -365,11 +365,10 @@ class HybridTrader:
                 async def _op():
                     return await self.client.create_and_place_order(
                         market_name=self._market.name,
-                        side=OrderSide.BUY,
-                        order_type="limit",
-                        size=qty,
+                        amount_of_synthetic=qty,
                         price=price,
-                        time_in_force="GTC",
+                        side=OrderSide.BUY,
+                        post_only=True,
                         external_id=ext_id,
                     )
                 try:
@@ -393,11 +392,10 @@ class HybridTrader:
                 async def _op():
                     return await self.client.create_and_place_order(
                         market_name=self._market.name,
-                        side=OrderSide.SELL,
-                        order_type="limit",
-                        size=qty,
+                        amount_of_synthetic=qty,
                         price=price,
-                        time_in_force="GTC",
+                        side=OrderSide.SELL,
+                        post_only=True,
                         external_id=ext_id,
                     )
                 try:
@@ -452,15 +450,16 @@ class HybridTrader:
         if side == OrderSide.SELL and -pos >= MAX_POSITION_USD:
             return
 
-        qty = SCALP_ORDER_USD / mid if mid else Decimal(0)
+        price = Decimal(ask.price) if side == OrderSide.BUY else Decimal(bid.price)
+        qty = SCALP_ORDER_USD / price if price else Decimal(0)
         ext_id = uuid_external_id("hyb_scalp", side.name.lower())
 
         async def _op():
             return await self.client.create_and_place_order(
                 market_name=self._market.name,
+                amount_of_synthetic=qty,
+                price=price,
                 side=side,
-                order_type="market",
-                size=qty,
                 external_id=ext_id,
             )
 
@@ -471,15 +470,15 @@ class HybridTrader:
             return
 
         if side == OrderSide.BUY:
-            stop = mid * (1 - STOP_BPS)
-            target = mid * (1 + TARGET_BPS)
+            stop = price * (1 - STOP_BPS)
+            target = price * (1 + TARGET_BPS)
         else:
-            stop = mid * (1 + STOP_BPS)
-            target = mid * (1 - TARGET_BPS)
+            stop = price * (1 + STOP_BPS)
+            target = price * (1 - TARGET_BPS)
 
         self._open_trade = Trade(
             side=side,
-            entry=mid,
+            entry=price,
             stop=stop,
             target=target,
             opened_at=time.time(),
@@ -489,15 +488,24 @@ class HybridTrader:
         """Close an open trade with a market order."""
 
         exit_side = OrderSide.SELL if trade.side == OrderSide.BUY else OrderSide.BUY
+
+        bid_fn = getattr(self._order_book, "best_bid", None)
+        bid = bid_fn() if bid_fn else None
+        ask_fn = getattr(self._order_book, "best_ask", None)
+        ask = ask_fn() if ask_fn else None
+        if not (bid and ask):
+            return
+
         qty = SCALP_ORDER_USD / trade.entry if trade.entry else Decimal(0)
+        price = Decimal(ask.price) if exit_side == OrderSide.BUY else Decimal(bid.price)
         ext_id = uuid_external_id("hyb_exit", exit_side.name.lower())
 
         async def _op():
             return await self.client.create_and_place_order(
                 market_name=self._market.name,
+                amount_of_synthetic=qty,
+                price=price,
                 side=exit_side,
-                order_type="market",
-                size=qty,
                 external_id=ext_id,
             )
 

@@ -293,14 +293,18 @@ class HybridTrader:
     async def _trading_loop(self) -> None:
         """Dispatch to the appropriate mode's trading function."""
         while not self._closing.is_set():
-            await self._check_mm_fills()
-            distance = self._distance_to_entry()
-            logger.info("mode=%s distance_to_entry=%.5f", self._mode, distance)
-            if self._mode == "calm":
-                await self._market_make()
-            else:
-                await self._scalp_momentum()
-            await asyncio.sleep(REFRESH_INTERVAL_SEC)
+            try:
+                await self._check_mm_fills()
+                distance = self._distance_to_entry()
+                logger.info("mode=%s distance_to_entry=%.5f", self._mode, distance)
+                if self._mode == "calm":
+                    await self._market_make()
+                else:
+                    await self._scalp_momentum()
+                await asyncio.sleep(REFRESH_INTERVAL_SEC)
+            except Exception:  # noqa: BLE001
+                logger.exception("trading loop aborted")
+                await asyncio.sleep(REFRESH_INTERVAL_SEC)
 
     def _distance_to_entry(self) -> float:
         """Return relative distance of mid price from VWAP for entry."""

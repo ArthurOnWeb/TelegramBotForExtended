@@ -20,7 +20,7 @@ import os
 import signal
 from collections import deque
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Deque, Optional
 import time
 
@@ -110,6 +110,7 @@ class HybridTrader:
         self._order_book: Optional[OrderBook] = None
         self._market = None
         self._closing = asyncio.Event()
+        self._tick: Decimal | None = None
 
         self._mid_history: Deque[float] = deque(maxlen=PRICE_HISTORY_LEN)
         self._mode: str = "calm"
@@ -132,6 +133,14 @@ class HybridTrader:
         self._regime_task: asyncio.Task | None = None
         self._trade_task: asyncio.Task | None = None
 
+    @staticmethod
+    def get_tick(cfg) -> Decimal:
+        min_change = getattr(cfg, "min_price_change", None)
+        if min_change is not None:
+            return Decimal(str(min_change))
+        prec = getattr(cfg, "price_precision", 2)
+        return Decimal(1).scaleb(-prec)
+
     # ------------------------------------------------------------------
     async def start(self) -> None:
         """Initialise market data and background tasks."""
@@ -139,6 +148,7 @@ class HybridTrader:
         if self.market_name not in markets:
             raise RuntimeError(f"Market {self.market_name} introuvable.")
         self._market = markets[self.market_name]
+        self._tick = self.get_tick(self._market.trading_config)
 
         # Order book used for both quoting and regime detection
         self._order_book = await OrderBook.create(
@@ -348,11 +358,17 @@ class HybridTrader:
             self._mm_sell_price = None
 
         size_usd = MAKER_ORDER_USD * Decimal(self._lambda_) if self._lambda_ else MAKER_ORDER_USD
-        qty = size_usd / mid if mid else Decimal(0)
+        qty = (
+            self._market.trading_config.calculate_order_size_from_value(size_usd, mid)
+            if mid
+            else Decimal(0)
+        )
 
         if buy_allowed:
             spread = Decimal(self._k) if self._k else MAKER_SPREAD
             price = mid * (1 - spread)
+            if self._tick is not None:
+                price = price.quantize(self._tick, rounding=ROUND_FLOOR)
             # Reprice if moved
             if self._mm_buy_id and self._mm_buy_price:
                 diff = abs(price - self._mm_buy_price) / self._mm_buy_price
@@ -381,6 +397,8 @@ class HybridTrader:
         if sell_allowed:
             spread = Decimal(self._k) if self._k else MAKER_SPREAD
             price = mid * (1 + spread)
+            if self._tick is not None:
+                price = price.quantize(self._tick, rounding=ROUND_CEILING)
             if self._mm_sell_id and self._mm_sell_price:
                 diff = abs(price - self._mm_sell_price) / self._mm_sell_price
                 if diff > REPRICE_BPS:
@@ -451,7 +469,11 @@ class HybridTrader:
             return
 
         price = Decimal(ask.price) if side == OrderSide.BUY else Decimal(bid.price)
-        qty = SCALP_ORDER_USD / price if price else Decimal(0)
+        qty = (
+            self._market.trading_config.calculate_order_size_from_value(SCALP_ORDER_USD, price)
+            if price
+            else Decimal(0)
+        )
         ext_id = uuid_external_id("hyb_scalp", side.name.lower())
 
         async def _op():
@@ -496,7 +518,13 @@ class HybridTrader:
         if not (bid and ask):
             return
 
-        qty = SCALP_ORDER_USD / trade.entry if trade.entry else Decimal(0)
+        qty = (
+            self._market.trading_config.calculate_order_size_from_value(
+                SCALP_ORDER_USD, trade.entry
+            )
+            if trade.entry
+            else Decimal(0)
+        )
         price = Decimal(ask.price) if exit_side == OrderSide.BUY else Decimal(bid.price)
         ext_id = uuid_external_id("hyb_exit", exit_side.name.lower())
 

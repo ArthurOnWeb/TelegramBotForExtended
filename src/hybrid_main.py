@@ -165,7 +165,7 @@ class HybridTrader:
                 try:
                     await task
                 except asyncio.CancelledError:
-     _logg               pass
+                    pass
 
         if self._order_book:
             await self._order_book.close()

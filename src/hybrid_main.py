@@ -71,7 +71,7 @@ STOP_BPS = Decimal(os.getenv("HYB_STOP_BPS", "0.001"))
 TARGET_BPS = Decimal(os.getenv("HYB_TARGET_BPS", "0.0015"))
 
 # Multi-level market making parameters
-MAKER_LEVELS = int(os.getenv("HYB_MM_LEVELS", "1"))
+MAKER_LEVELS = int(os.getenv("HYB_MM_LEVELS", "2"))
 MAKER_DELTA = float(os.getenv("HYB_MM_DELTA", "0.0005"))
 MM_EPSILON = float(os.getenv("HYB_MM_EPSILON", "1.0"))
 MM_MAX_AGE_SEC = float(os.getenv("HYB_MM_MAX_AGE", "30"))

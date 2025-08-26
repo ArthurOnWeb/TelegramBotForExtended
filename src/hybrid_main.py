@@ -363,8 +363,8 @@ class HybridTrader:
             if self._mm_buy_id is None:
                 ext_id = uuid_external_id("hyb_mm", "buy")
                 async def _op():
-                    return await self.client.create_order(
-                        market=self._market.name,
+                    return await self.client.create_and_place_order(
+                        market_name=self._market.name,
                         side=OrderSide.BUY,
                         order_type="limit",
                         size=qty,
@@ -391,8 +391,8 @@ class HybridTrader:
             if self._mm_sell_id is None:
                 ext_id = uuid_external_id("hyb_mm", "sell")
                 async def _op():
-                    return await self.client.create_order(
-                        market=self._market.name,
+                    return await self.client.create_and_place_order(
+                        market_name=self._market.name,
                         side=OrderSide.SELL,
                         order_type="limit",
                         size=qty,
@@ -456,8 +456,8 @@ class HybridTrader:
         ext_id = uuid_external_id("hyb_scalp", side.name.lower())
 
         async def _op():
-            return await self.client.create_order(
-                market=self._market.name,
+            return await self.client.create_and_place_order(
+                market_name=self._market.name,
                 side=side,
                 order_type="market",
                 size=qty,
@@ -493,8 +493,8 @@ class HybridTrader:
         ext_id = uuid_external_id("hyb_exit", exit_side.name.lower())
 
         async def _op():
-            return await self.client.create_order(
-                market=self._market.name,
+            return await self.client.create_and_place_order(
+                market_name=self._market.name,
                 side=exit_side,
                 order_type="market",
                 size=qty,

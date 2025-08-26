@@ -32,7 +32,7 @@ from account import TradingAccount
 from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
 from id_generator import uuid_external_id
-from utils import logger
+from utils import logger,setup_logging
 from regime.calibration import VolatilityCalibrator
 from strategy.quoting import Quoter
 
@@ -145,6 +145,7 @@ class HybridTrader:
             self._endpoint_config, market_name=self._market.name, start=True
         )
 
+        setup_logging(logging.DEBUG)
         # Instantiate quoter with current order book
         self._quoter = Quoter(
             self._order_book,
@@ -164,7 +165,7 @@ class HybridTrader:
                 try:
                     await task
                 except asyncio.CancelledError:
-                    pass
+     _logg               pass
 
         if self._order_book:
             await self._order_book.close()

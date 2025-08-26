@@ -77,6 +77,11 @@ TARGET_BPS = Decimal(os.getenv("HYB_TARGET_BPS", "0.0015"))
 DEFAULT_BETA_K = [0.0, 0.0, float(MAKER_SPREAD)]
 DEFAULT_BETA_LAMBDA = [0.0, 0.0, 1.0]
 
+# Avellaneda-Stoikov parameters
+GAMMA = Decimal(os.getenv("HYB_GAMMA", "0"))
+MIN_H = float(os.getenv("HYB_MIN_H", "0"))
+IMBALANCE_LAMBDA = float(os.getenv("HYB_LAMBDA", "0"))
+
 
 @dataclass
 class Trade:
@@ -123,6 +128,7 @@ class HybridTrader:
         self._quoter: Quoter | None = None
         self._k: float = float(MAKER_SPREAD)
         self._lambda_: float = 1.0
+        self._sigma: float = 0.0
 
         # Track outstanding maker orders
         self._mm_buy_id: Optional[str] = None
@@ -197,6 +203,7 @@ class HybridTrader:
                 spread = float("inf")
 
             sigma = self._realised_vol()
+            self._sigma = sigma
             if self._quoter:
                 self._k, self._lambda_ = self._quoter.refresh_parameters(sigma)
             # Update calibration with latest 5min volatility estimate
@@ -341,8 +348,23 @@ class HybridTrader:
         if not (bid and ask):
             return
 
-        mid = (Decimal(bid.price) + Decimal(ask.price)) / 2
+        bid_price = Decimal(bid.price)
+        ask_price = Decimal(ask.price)
+        bid_vol = Decimal(getattr(bid, "amount", 0))
+        ask_vol = Decimal(getattr(ask, "amount", 0))
+        denom = bid_vol + ask_vol
+        if denom == 0:
+            return
+        microprice = (ask_price * bid_vol + bid_price * ask_vol) / denom
+        imbalance = float((bid_vol - ask_vol) / denom)
+
         pos = await self._get_signed_position()
+        c = microprice - GAMMA * pos
+
+        sigma = self._sigma
+        k = self._k if self._k else float(MAKER_SPREAD)
+        h = max(MIN_H, k * sigma * (1 + IMBALANCE_LAMBDA * abs(imbalance)))
+        h_dec = Decimal(h)
 
         buy_allowed = pos < MAX_POSITION_USD
         sell_allowed = -pos < MAX_POSITION_USD
@@ -359,17 +381,19 @@ class HybridTrader:
 
         size_usd = MAKER_ORDER_USD * Decimal(self._lambda_) if self._lambda_ else MAKER_ORDER_USD
         qty = (
-            self._market.trading_config.calculate_order_size_from_value(size_usd, mid)
-            if mid
+            self._market.trading_config.calculate_order_size_from_value(size_usd, c)
+            if c
             else Decimal(0)
         )
 
+        bid_px = c * (1 - h_dec)
+        ask_px = c * (1 + h_dec)
+        if self._tick is not None:
+            bid_px = bid_px.quantize(self._tick, rounding=ROUND_FLOOR)
+            ask_px = ask_px.quantize(self._tick, rounding=ROUND_CEILING)
+
         if buy_allowed:
-            spread = Decimal(self._k) if self._k else MAKER_SPREAD
-            price = mid * (1 - spread)
-            if self._tick is not None:
-                price = price.quantize(self._tick, rounding=ROUND_FLOOR)
-            # Reprice if moved
+            price = bid_px
             if self._mm_buy_id and self._mm_buy_price:
                 diff = abs(price - self._mm_buy_price) / self._mm_buy_price
                 if diff > REPRICE_BPS:
@@ -395,10 +419,7 @@ class HybridTrader:
                     logger.warning("[MM] buy order failed: %s", e)
 
         if sell_allowed:
-            spread = Decimal(self._k) if self._k else MAKER_SPREAD
-            price = mid * (1 + spread)
-            if self._tick is not None:
-                price = price.quantize(self._tick, rounding=ROUND_CEILING)
+            price = ask_px
             if self._mm_sell_id and self._mm_sell_price:
                 diff = abs(price - self._mm_sell_price) / self._mm_sell_price
                 if diff > REPRICE_BPS:

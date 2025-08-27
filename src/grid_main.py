@@ -212,6 +212,8 @@ class GridTrader:
     async def _update_grid(self, mid: Decimal) -> None:
         if self._tick is None:
             return
+        buy_tasks = []
+        sell_tasks = []
         for i in range(self.level_count):
             level = i + 1
             buy_px = (mid - self.grid_step * level).quantize(
@@ -220,8 +222,13 @@ class GridTrader:
             sell_px = (mid + self.grid_step * level).quantize(
                 self._tick, rounding=ROUND_CEILING
             )
-            await self._ensure_order(self._buy_slots, OrderSide.BUY, i, buy_px)
-            await self._ensure_order(self._sell_slots, OrderSide.SELL, i, sell_px)
+            buy_tasks.append(
+                self._ensure_order(self._buy_slots, OrderSide.BUY, i, buy_px)
+            )
+            sell_tasks.append(
+                self._ensure_order(self._sell_slots, OrderSide.SELL, i, sell_px)
+            )
+        await asyncio.gather(*buy_tasks, *sell_tasks)
 
 
 # ----------------------------------------------------------------------

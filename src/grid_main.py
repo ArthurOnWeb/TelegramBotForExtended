@@ -76,6 +76,12 @@ class GridTrader:
         self._sell_slots: List[Slot] = [Slot(None, None) for _ in range(level_count)]
         self._placement_lock = asyncio.Lock()
 
+        # Ensure only one grid update runs at a time.
+        # ``_next_mid`` keeps track of the most recent mid price requested while an
+        # update is in progress so that redundant updates can be coalesced.
+        self._update_lock = asyncio.Lock()
+        self._next_mid: Decimal | None = None
+
         self._order_book: OrderBook | None = None
         self._market = None
         self._tick: Decimal | None = None
@@ -85,6 +91,23 @@ class GridTrader:
         self._refresh_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
+    async def _queue_update(self, mid: Decimal) -> None:
+        """Schedule a grid update for ``mid``.
+
+        If an update is already running, only remember the most recent mid price and
+        let the running update pick it up once finished.  This coalesces redundant
+        updates when prices move quickly.
+        """
+
+        self._next_mid = mid
+        if self._update_lock.locked():
+            return
+        while self._next_mid is not None:
+            current = self._next_mid
+            self._next_mid = None
+            async with self._update_lock:
+                await self._update_grid(current)
+
     async def _on_best_change(self, price: Decimal | None, *, is_bid: bool) -> None:
         if is_bid:
             self._best_bid = price
@@ -92,7 +115,7 @@ class GridTrader:
             self._best_ask = price
         if self._best_bid is not None and self._best_ask is not None:
             mid = (self._best_bid + self._best_ask) / 2
-            await self._update_grid(mid)
+            await self._queue_update(mid)
 
     async def _create_order_book(self) -> OrderBook:
         return await OrderBook.create(
@@ -156,7 +179,7 @@ class GridTrader:
         while not self._closing.is_set():
             if self._best_bid is not None and self._best_ask is not None:
                 mid = (self._best_bid + self._best_ask) / 2
-                await self._update_grid(mid)
+                await self._queue_update(mid)
             await asyncio.sleep(REFRESH_INTERVAL_SEC)
 
     # ------------------------------------------------------------------

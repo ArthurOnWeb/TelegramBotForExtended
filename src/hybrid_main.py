@@ -70,6 +70,17 @@ REPRICE_BPS = Decimal(os.getenv("HYB_REPRICE_BPS", "0.0002"))
 STOP_BPS = Decimal(os.getenv("HYB_STOP_BPS", "0.001"))
 TARGET_BPS = Decimal(os.getenv("HYB_TARGET_BPS", "0.0015"))
 
+# Momentum scalping parameters
+ATR_WINDOW_SEC = int(os.getenv("HYB_ATR_WINDOW_SEC", "180"))
+VWAP_WINDOW_SEC = int(os.getenv("HYB_VWAP_WINDOW_SEC", "300"))
+ATR_BETA = float(os.getenv("HYB_ATR_BETA", "1.0"))
+STOP_ATR_MULT = float(os.getenv("HYB_STOP_ATR_MULT", "0.5"))
+TP_ATR_MULT = float(os.getenv("HYB_TP_ATR_MULT", "1.0"))
+TRAILING_STOP = os.getenv("HYB_TRAILING", "true").lower() == "true"
+TRADE_TIMEOUT_SEC = float(os.getenv("HYB_TRADE_TIMEOUT", "60"))
+ATR_HISTORY_LEN = max(1, int(ATR_WINDOW_SEC / REFRESH_INTERVAL_SEC))
+VWAP_HISTORY_LEN = max(1, int(VWAP_WINDOW_SEC / REFRESH_INTERVAL_SEC))
+
 # Multi-level market making parameters
 MAKER_LEVELS = int(os.getenv("HYB_MM_LEVELS", "2"))
 MAKER_DELTA = float(os.getenv("HYB_MM_DELTA", "0.0005"))
@@ -124,8 +135,16 @@ class HybridTrader:
         self._tick: Decimal | None = None
 
         self._mid_history: Deque[float] = deque(maxlen=PRICE_HISTORY_LEN)
+        self._vwap_prices: Deque[float] = deque(maxlen=VWAP_HISTORY_LEN)
+        self._tr_history: Deque[float] = deque(maxlen=ATR_HISTORY_LEN)
+        self._prev_mid: float | None = None
         self._mode: str = "calm"
         self._open_trade: Optional[Trade] = None
+        self._trade_timeout = TRADE_TIMEOUT_SEC
+        self._trailing = TRAILING_STOP
+        self._stop_mult = STOP_ATR_MULT
+        self._tp_mult = TP_ATR_MULT
+        self._beta = ATR_BETA
 
         # Volatility calibration
         self._calibrator = VolatilityCalibrator()
@@ -211,6 +230,13 @@ class HybridTrader:
             if bid and ask:
                 mid = float((bid.price + ask.price) / 2)
                 self._mid_history.append(mid)
+                self._vwap_prices.append(mid)
+                high = float(ask.price)
+                low = float(bid.price)
+                if self._prev_mid is not None:
+                    tr = max(high - low, abs(high - self._prev_mid), abs(low - self._prev_mid))
+                    self._tr_history.append(tr)
+                self._prev_mid = mid
                 spread = float(ask.price - bid.price)
             else:
                 spread = float("inf")
@@ -511,30 +537,43 @@ class HybridTrader:
             return
 
         mid = (Decimal(bid.price) + Decimal(ask.price)) / 2
+        vwap = (
+            sum(self._vwap_prices) / len(self._vwap_prices)
+            if self._vwap_prices
+            else float(mid)
+        )
+        atr = sum(self._tr_history) / len(self._tr_history) if self._tr_history else 0.0
 
         # Manage open trade first
         if self._open_trade:
             trade = self._open_trade
+            now = time.time()
             if trade.side == OrderSide.BUY and bid:
                 price = Decimal(bid.price)
+                if self._trailing and atr > 0:
+                    new_stop = price - Decimal(self._stop_mult) * Decimal(atr)
+                    if new_stop > trade.stop:
+                        trade.stop = new_stop
                 if price <= trade.stop or price >= trade.target:
+                    await self._close_trade(trade)
+                elif now - trade.opened_at >= self._trade_timeout and mid <= Decimal(vwap):
                     await self._close_trade(trade)
             elif trade.side == OrderSide.SELL and ask:
                 price = Decimal(ask.price)
+                if self._trailing and atr > 0:
+                    new_stop = price + Decimal(self._stop_mult) * Decimal(atr)
+                    if new_stop < trade.stop:
+                        trade.stop = new_stop
                 if price >= trade.stop or price <= trade.target:
+                    await self._close_trade(trade)
+                elif now - trade.opened_at >= self._trade_timeout and mid >= Decimal(vwap):
                     await self._close_trade(trade)
             return
 
-        vwap = (
-            sum(self._mid_history) / len(self._mid_history)
-            if self._mid_history
-            else float(mid)
-        )
-
         side: OrderSide | None = None
-        if mid > vwap:
+        if float(ask.price) > vwap + self._beta * atr:
             side = OrderSide.BUY
-        elif mid < vwap:
+        elif float(bid.price) < vwap - self._beta * atr:
             side = OrderSide.SELL
         else:
             return
@@ -568,12 +607,15 @@ class HybridTrader:
             logger.warning("[SCALP] open trade failed: %s", e)
             return
 
+        atr_dec = Decimal(atr)
+        stop_offset = Decimal(self._stop_mult) * atr_dec
+        target_offset = Decimal(self._tp_mult) * atr_dec
         if side == OrderSide.BUY:
-            stop = price * (1 - STOP_BPS)
-            target = price * (1 + TARGET_BPS)
+            stop = price - stop_offset
+            target = price + target_offset
         else:
-            stop = price * (1 + STOP_BPS)
-            target = price * (1 - TARGET_BPS)
+            stop = price + stop_offset
+            target = price - target_offset
 
         self._open_trade = Trade(
             side=side,

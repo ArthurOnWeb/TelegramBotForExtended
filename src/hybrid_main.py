@@ -167,6 +167,8 @@ class HybridTrader:
         # Track outstanding maker orders by level
         self._mm_buy_orders: dict[int, tuple[str, Decimal, float]] = {}
         self._mm_sell_orders: dict[int, tuple[str, Decimal, float]] = {}
+        self._mm_buy_id: str | None = None
+        self._mm_sell_id: str | None = None
 
         self._regime_task: asyncio.Task | None = None
         self._trade_task: asyncio.Task | None = None
@@ -342,16 +344,44 @@ class HybridTrader:
         for level, (ext_id, _, _) in list(self._mm_buy_orders.items()):
             if ext_id not in open_ids:
                 del self._mm_buy_orders[level]
+                if level == 0:
+                    self._mm_buy_id = None
 
         for level, (ext_id, _, _) in list(self._mm_sell_orders.items()):
             if ext_id not in open_ids:
                 del self._mm_sell_orders[level]
+                if level == 0:
+                    self._mm_sell_id = None
+
+    # ------------------------------------------------------------------
+    async def cancel_all_quotes(self) -> None:
+        """Cancel all outstanding maker quotes and reset their IDs."""
+
+        if self._mm_buy_id:
+            await self._safe_cancel(external_id=self._mm_buy_id)
+        if self._mm_sell_id:
+            await self._safe_cancel(external_id=self._mm_sell_id)
+
+        for _, (ext_id, _, _) in list(self._mm_buy_orders.items()):
+            if ext_id != self._mm_buy_id:
+                await self._safe_cancel(external_id=ext_id)
+        for _, (ext_id, _, _) in list(self._mm_sell_orders.items()):
+            if ext_id != self._mm_sell_id:
+                await self._safe_cancel(external_id=ext_id)
+
+        self._mm_buy_orders.clear()
+        self._mm_sell_orders.clear()
+        self._mm_buy_id = None
+        self._mm_sell_id = None
 
     # ------------------------------------------------------------------
     async def _trading_loop(self) -> None:
         """Dispatch to the appropriate mode's trading function."""
+        prev_mode = self._mode
         while not self._closing.is_set():
             try:
+                if self._mode == "agitated" and prev_mode != "agitated":
+                    await self.cancel_all_quotes()
                 await self._check_mm_fills()
                 distance = self._distance_to_entry()
                 logger.info("mode=%s distance_to_entry=%.5f", self._mode, distance)
@@ -359,6 +389,7 @@ class HybridTrader:
                     await self._market_make()
                 else:
                     await self._scalp_momentum()
+                prev_mode = self._mode
                 await asyncio.sleep(REFRESH_INTERVAL_SEC)
             except Exception:  # noqa: BLE001
                 logger.exception("trading loop aborted")
@@ -390,6 +421,9 @@ class HybridTrader:
         ask_fn = getattr(self._order_book, "best_ask", None)
         ask = ask_fn() if ask_fn else None
         if not (bid and ask):
+            return
+
+        if self._mm_buy_orders or self._mm_sell_orders:
             return
 
         bid_price = Decimal(bid.price)
@@ -428,10 +462,12 @@ class HybridTrader:
             for level, (ext_id, _, _) in list(self._mm_buy_orders.items()):
                 await self._safe_cancel(external_id=ext_id)
                 del self._mm_buy_orders[level]
+            self._mm_buy_id = None
         if not sell_allowed:
             for level, (ext_id, _, _) in list(self._mm_sell_orders.items()):
                 await self._safe_cancel(external_id=ext_id)
                 del self._mm_sell_orders[level]
+            self._mm_sell_id = None
 
         size_usd = MAKER_ORDER_USD * Decimal(self._lambda_) if self._lambda_ else MAKER_ORDER_USD
         qty = (
@@ -460,6 +496,8 @@ class HybridTrader:
                 if level >= self._mm_levels:
                     await self._safe_cancel(external_id=ext_id)
                     del self._mm_buy_orders[level]
+                    if level == 0:
+                        self._mm_buy_id = None
                     continue
                 target = bid_prices[level]
                 diff = abs(target - px) / px if px else Decimal(0)
@@ -467,6 +505,8 @@ class HybridTrader:
                 if age > self._mm_max_age or diff > epsilon_sigma:
                     await self._safe_cancel(external_id=ext_id)
                     del self._mm_buy_orders[level]
+                    if level == 0:
+                        self._mm_buy_id = None
 
         # Remove stale sell orders
         if sell_allowed:
@@ -474,6 +514,8 @@ class HybridTrader:
                 if level >= self._mm_levels:
                     await self._safe_cancel(external_id=ext_id)
                     del self._mm_sell_orders[level]
+                    if level == 0:
+                        self._mm_sell_id = None
                     continue
                 target = ask_prices[level]
                 diff = abs(target - px) / px if px else Decimal(0)
@@ -481,6 +523,8 @@ class HybridTrader:
                 if age > self._mm_max_age or diff > epsilon_sigma:
                     await self._safe_cancel(external_id=ext_id)
                     del self._mm_sell_orders[level]
+                    if level == 0:
+                        self._mm_sell_id = None
 
         # Place missing buy orders
         if buy_allowed:
@@ -501,6 +545,8 @@ class HybridTrader:
                     try:
                         await call_with_retries(_op, limiter=self._limiter)
                         self._mm_buy_orders[level] = (ext_id, price, time.time())
+                        if level == 0:
+                            self._mm_buy_id = ext_id
                     except Exception as e:  # noqa: PERF203
                         logger.warning("[MM] buy order failed: %s", e)
 
@@ -523,6 +569,8 @@ class HybridTrader:
                     try:
                         await call_with_retries(_op, limiter=self._limiter)
                         self._mm_sell_orders[level] = (ext_id, price, time.time())
+                        if level == 0:
+                            self._mm_sell_id = ext_id
                     except Exception as e:  # noqa: PERF203
                         logger.warning("[MM] sell order failed: %s", e)
 
@@ -568,6 +616,9 @@ class HybridTrader:
                     await self._close_trade(trade)
                 elif now - trade.opened_at >= self._trade_timeout and mid >= Decimal(vwap):
                     await self._close_trade(trade)
+            return
+
+        if self._mm_buy_orders or self._mm_sell_orders:
             return
 
         side: OrderSide | None = None

@@ -423,8 +423,10 @@ class HybridTrader:
         if not (bid and ask):
             return
 
-        if self._mm_buy_orders or self._mm_sell_orders:
-            return
+        # Track whether quotes existed when entering the function so that
+        # cancellation/repricing still runs but new placements can be skipped.
+        had_buy_orders = bool(self._mm_buy_orders)
+        had_sell_orders = bool(self._mm_sell_orders)
 
         bid_price = Decimal(bid.price)
         ask_price = Decimal(ask.price)
@@ -526,8 +528,8 @@ class HybridTrader:
                     if level == 0:
                         self._mm_sell_id = None
 
-        # Place missing buy orders
-        if buy_allowed:
+        # Place new buy orders only if none existed at entry
+        if buy_allowed and not had_buy_orders:
             for level, price in enumerate(bid_prices):
                 if level not in self._mm_buy_orders:
                     ext_id = uuid_external_id("hyb_mm", f"buy_{level}")
@@ -550,8 +552,8 @@ class HybridTrader:
                     except Exception as e:  # noqa: PERF203
                         logger.warning("[MM] buy order failed: %s", e)
 
-        # Place missing sell orders
-        if sell_allowed:
+        # Place new sell orders only if none existed at entry
+        if sell_allowed and not had_sell_orders:
             for level, price in enumerate(ask_prices):
                 if level not in self._mm_sell_orders:
                     ext_id = uuid_external_id("hyb_mm", f"sell_{level}")

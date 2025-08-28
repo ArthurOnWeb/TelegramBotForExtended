@@ -45,6 +45,7 @@ class Slot:
 
     external_id: Optional[str]
     price: Optional[Decimal]
+    side: OrderSide
 
 
 class GridTrader:
@@ -77,8 +78,12 @@ class GridTrader:
         self._endpoint_config = account.endpoint_config
         self._limiter = build_rate_limiter()
 
-        self._buy_slots: List[Slot] = [Slot(None, None) for _ in range(level_count)]
-        self._sell_slots: List[Slot] = [Slot(None, None) for _ in range(level_count)]
+        self._buy_slots: List[Slot] = [
+            Slot(None, None, OrderSide.BUY) for _ in range(level_count)
+        ]
+        self._sell_slots: List[Slot] = [
+            Slot(None, None, OrderSide.SELL) for _ in range(level_count)
+        ]
         self._placement_lock = asyncio.Lock()
 
         # Ensure only one grid update runs at a time.
@@ -196,12 +201,15 @@ class GridTrader:
         self, slots: List[Slot], side: OrderSide, idx: int, price: Decimal
     ) -> None:
         slot = slots[idx]
-        if slot.external_id and slot.price == price:
+        if slot.external_id and slot.price == price and slot.side == side:
             return
 
-        synthetic = self._market.trading_config.calculate_order_size_from_value(
-            self.order_size_usd, price
-        )
+        def _order_size(px: Decimal) -> Decimal:
+            return self._market.trading_config.calculate_order_size_from_value(
+                self.order_size_usd, px
+            )
+
+        synthetic = _order_size(price)
         min_size = self._market.trading_config.min_order_size
         if synthetic < min_size:
             return
@@ -209,12 +217,15 @@ class GridTrader:
         new_external_id = uuid_external_id("grid", side.name.lower(), idx)
         previous_id = slot.external_id
 
-        async def _place(prev_id: Optional[str]):
+        async def _place(prev_id: Optional[str], px: Decimal, s: OrderSide):
+            size = _order_size(px)
+            if size < min_size:
+                return None
             return await self.client.create_and_place_order(
                 market_name=self._market.name,
-                amount_of_synthetic=synthetic,
-                price=price,
-                side=side,
+                amount_of_synthetic=size,
+                price=px,
+                side=s,
                 post_only=True,
                 previous_order_external_id=prev_id,
                 external_id=new_external_id,
@@ -222,25 +233,45 @@ class GridTrader:
 
         try:
             async with self._placement_lock:
-                await call_with_retries(lambda: _place(previous_id), limiter=self._limiter)
-            slots[idx] = Slot(new_external_id, price)
+                await call_with_retries(
+                    lambda: _place(previous_id, price, side), limiter=self._limiter
+                )
+            slots[idx] = Slot(new_external_id, price, side)
         except Exception as e:
             if self._is_edit_not_found(e):
-                try:
-                    async with self._placement_lock:
-                        await call_with_retries(lambda: _place(None), limiter=self._limiter)
-                    slots[idx] = Slot(new_external_id, price)
-                    return
-                except Exception as e2:
-                    logger.warning("order placement failed: %s", e2)
+                new_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
+                new_price = (
+                    (price + self.grid_step)
+                    if side == OrderSide.BUY
+                    else (price - self.grid_step)
+                )
+                if self._tick is not None:
+                    new_price = new_price.quantize(
+                        self._tick,
+                        rounding=ROUND_CEILING
+                        if new_side == OrderSide.SELL
+                        else ROUND_FLOOR,
+                    )
+                new_synthetic = _order_size(new_price)
+                if new_synthetic >= min_size:
+                    try:
+                        async with self._placement_lock:
+                            await call_with_retries(
+                                lambda: _place(None, new_price, new_side),
+                                limiter=self._limiter,
+                            )
+                        slots[idx] = Slot(new_external_id, new_price, new_side)
+                        return
+                    except Exception as e2:
+                        logger.warning("order placement failed: %s", e2)
             else:
                 logger.warning("order placement failed: %s", e)
-            slots[idx] = Slot(None, None)
+            slots[idx] = Slot(None, None, side)
 
     async def _cancel_slot(self, slots: List[Slot], idx: int) -> None:
         slot = slots[idx]
         if not slot.external_id:
-            slots[idx] = Slot(None, None)
+            slots[idx] = Slot(None, None, slot.side)
             return
 
         async def _cancel():
@@ -251,7 +282,7 @@ class GridTrader:
         except Exception as e:
             if not self._is_edit_not_found(e):
                 logger.warning("order cancel failed: %s", e)
-        slots[idx] = Slot(None, None)
+        slots[idx] = Slot(None, None, slot.side)
 
     async def _update_grid(self, mid: Decimal) -> None:
         if self._tick is None:
@@ -260,21 +291,30 @@ class GridTrader:
         sell_tasks = []
         for i in range(self.level_count):
             level = i + 1
-            buy_px = (mid - self.grid_step * level).quantize(
-                self._tick, rounding=ROUND_FLOOR
-            )
-            sell_px = (mid + self.grid_step * level).quantize(
-                self._tick, rounding=ROUND_CEILING
-            )
-            if self.min_price <= buy_px <= self.max_price:
+            buy_slot = self._buy_slots[i]
+            if buy_slot.side == OrderSide.BUY:
+                buy_px = (mid - self.grid_step * level).quantize(
+                    self._tick, rounding=ROUND_FLOOR
+                )
+            else:
+                buy_px = buy_slot.price
+            if buy_px is not None and self.min_price <= buy_px <= self.max_price:
                 buy_tasks.append(
-                    self._ensure_order(self._buy_slots, OrderSide.BUY, i, buy_px)
+                    self._ensure_order(self._buy_slots, buy_slot.side, i, buy_px)
                 )
             else:
                 buy_tasks.append(self._cancel_slot(self._buy_slots, i))
-            if self.min_price <= sell_px <= self.max_price:
+
+            sell_slot = self._sell_slots[i]
+            if sell_slot.side == OrderSide.SELL:
+                sell_px = (mid + self.grid_step * level).quantize(
+                    self._tick, rounding=ROUND_CEILING
+                )
+            else:
+                sell_px = sell_slot.price
+            if sell_px is not None and self.min_price <= sell_px <= self.max_price:
                 sell_tasks.append(
-                    self._ensure_order(self._sell_slots, OrderSide.SELL, i, sell_px)
+                    self._ensure_order(self._sell_slots, sell_slot.side, i, sell_px)
                 )
             else:
                 sell_tasks.append(self._cancel_slot(self._sell_slots, i))

@@ -86,59 +86,20 @@ class GridTrader:
         ]
         self._placement_lock = asyncio.Lock()
 
-        # Ensure only one grid update runs at a time.
-        # ``_next_mid`` keeps track of the most recent mid price requested while an
-        # update is in progress so that redundant updates can be coalesced.
-        self._update_lock = asyncio.Lock()
-        self._next_mid: Decimal | None = None
-
         self._order_book: OrderBook | None = None
         self._market = None
         self._tick: Decimal | None = None
-        self._best_bid: Decimal | None = None
-        self._best_ask: Decimal | None = None
         self._closing = asyncio.Event()
         self._refresh_task: asyncio.Task | None = None
-        self._grid_active = True
+        self._buy_prices: List[Decimal] = []
+        self._sell_prices: List[Decimal] = []
 
     # ------------------------------------------------------------------
-    async def _queue_update(self, mid: Decimal) -> None:
-        """Schedule a grid update for ``mid``.
-
-        If an update is already running, only remember the most recent mid price and
-        let the running update pick it up once finished.  This coalesces redundant
-        updates when prices move quickly.
-        """
-
-        self._next_mid = mid
-        if self._update_lock.locked():
-            return
-        while self._next_mid is not None:
-            current = self._next_mid
-            self._next_mid = None
-            async with self._update_lock:
-                await self._update_grid(current)
-
-    async def _on_best_change(self, price: Decimal | None, *, is_bid: bool) -> None:
-        if is_bid:
-            self._best_bid = price
-        else:
-            self._best_ask = price
-        if self._best_bid is not None and self._best_ask is not None:
-            mid = (self._best_bid + self._best_ask) / 2
-            await self._queue_update(mid)
-
     async def _create_order_book(self) -> OrderBook:
         return await OrderBook.create(
             self._endpoint_config,
             market_name=self._market.name,
             start=True,
-            best_bid_change_callback=lambda bid: asyncio.create_task(
-                self._on_best_change(bid.price if bid else None, is_bid=True)
-            ),
-            best_ask_change_callback=lambda ask: asyncio.create_task(
-                self._on_best_change(ask.price if ask else None, is_bid=False)
-            ),
         )
 
     @staticmethod
@@ -157,6 +118,16 @@ class GridTrader:
         self._market = markets[self.market_name]
         self._tick = self.get_tick(self._market.trading_config)
 
+        mid = (self.min_price + self.max_price) / 2
+        self._buy_prices = [
+            (mid - self.grid_step * (i + 1)).quantize(self._tick, rounding=ROUND_FLOOR)
+            for i in range(self.level_count)
+        ]
+        self._sell_prices = [
+            (mid + self.grid_step * (i + 1)).quantize(self._tick, rounding=ROUND_CEILING)
+            for i in range(self.level_count)
+        ]
+
         # Clear any stale orders from previous runs
         await call_with_retries(
             lambda: self.client.mass_cancel(markets=[self._market.name]),
@@ -164,6 +135,7 @@ class GridTrader:
         )
 
         self._order_book = await self._create_order_book()
+        await self._update_grid()
         self._refresh_task = asyncio.create_task(self._refresh_loop())
 
     async def stop(self) -> None:
@@ -188,9 +160,7 @@ class GridTrader:
 
     async def _refresh_loop(self) -> None:
         while not self._closing.is_set():
-            if self._best_bid is not None and self._best_ask is not None:
-                mid = (self._best_bid + self._best_ask) / 2
-                await self._queue_update(mid)
+            await self._update_grid()
             await asyncio.sleep(REFRESH_INTERVAL_SEC)
 
     # ------------------------------------------------------------------
@@ -285,68 +255,28 @@ class GridTrader:
                 logger.warning("order cancel failed: %s", e)
         slots[idx] = Slot(None, None, slot.side)
 
-    async def _update_grid(self, mid: Decimal) -> None:
+    async def _update_grid(self) -> None:
         if self._tick is None:
             return
-        if mid < self.min_price or mid > self.max_price:
-            if self._grid_active:
-                logger.warning(
-                    "mid price %s outside range [%s, %s]; grid inactive",
-                    mid,
-                    self.min_price,
-                    self.max_price,
-                )
-                self._grid_active = False
-            cancel_tasks = []
-            for i in range(self.level_count):
-                cancel_tasks.append(self._cancel_slot(self._buy_slots, i))
-                cancel_tasks.append(self._cancel_slot(self._sell_slots, i))
-            await asyncio.gather(*cancel_tasks)
-            return
-        elif not self._grid_active:
-            logger.info(
-                "mid price %s back inside range [%s, %s]; resuming grid",
-                mid,
-                self.min_price,
-                self.max_price,
-            )
-            self._grid_active = True
 
         buy_tasks = []
         sell_tasks = []
-        for i in range(self.level_count):
-            level = i + 1
-            buy_slot = self._buy_slots[i]
-            if buy_slot.side == OrderSide.BUY:
-                buy_px = (mid - self.grid_step * level).quantize(
-                    self._tick, rounding=ROUND_FLOOR
-                )
-                if buy_px < self.min_price or buy_px > self.max_price:
-                    buy_px = None
-            else:
-                buy_px = buy_slot.price
-            if buy_px is not None and self.min_price <= buy_px <= self.max_price:
+        for i, price in enumerate(self._buy_prices):
+            if self.min_price <= price <= self.max_price:
                 buy_tasks.append(
-                    self._ensure_order(self._buy_slots, buy_slot.side, i, buy_px)
+                    self._ensure_order(self._buy_slots, OrderSide.BUY, i, price)
                 )
             else:
                 buy_tasks.append(self._cancel_slot(self._buy_slots, i))
 
-            sell_slot = self._sell_slots[i]
-            if sell_slot.side == OrderSide.SELL:
-                sell_px = (mid + self.grid_step * level).quantize(
-                    self._tick, rounding=ROUND_CEILING
-                )
-                if sell_px < self.min_price or sell_px > self.max_price:
-                    sell_px = None
-            else:
-                sell_px = sell_slot.price
-            if sell_px is not None and self.min_price <= sell_px <= self.max_price:
+        for i, price in enumerate(self._sell_prices):
+            if self.min_price <= price <= self.max_price:
                 sell_tasks.append(
-                    self._ensure_order(self._sell_slots, sell_slot.side, i, sell_px)
+                    self._ensure_order(self._sell_slots, OrderSide.SELL, i, price)
                 )
             else:
                 sell_tasks.append(self._cancel_slot(self._sell_slots, i))
+
         await asyncio.gather(*buy_tasks, *sell_tasks)
 
 

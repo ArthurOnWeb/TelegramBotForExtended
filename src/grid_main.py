@@ -33,8 +33,9 @@ from utils import logger
 # interactively ask the user which market to trade on.
 MARKET_NAME = os.getenv("GRID_MARKET") or input("Market ? ")
 GRID_LEVELS = int(os.getenv("GRID_LEVELS", "3"))
-GRID_STEP_USD = Decimal(os.getenv("GRID_STEP_USD", "5"))
 GRID_SIZE_USD = Decimal(os.getenv("GRID_SIZE_USD", "25"))
+GRID_MIN_PRICE = Decimal(os.getenv("GRID_MIN_PRICE", "0"))
+GRID_MAX_PRICE = Decimal(os.getenv("GRID_MAX_PRICE", "0"))
 REFRESH_INTERVAL_SEC = float(os.getenv("GRID_REFRESH_SEC", "5"))
 
 
@@ -61,12 +62,16 @@ class GridTrader:
         grid_step: Decimal,
         level_count: int,
         order_size_usd: Decimal,
+        lower_bound: Decimal,
+        upper_bound: Decimal,
     ):
         self.account = account
         self.market_name = market_name
         self.grid_step = grid_step
         self.level_count = level_count
         self.order_size_usd = order_size_usd
+        self.min_price = lower_bound
+        self.max_price = upper_bound
 
         self.client: BlockingTradingClient = account.get_blocking_client()
         self._endpoint_config = account.endpoint_config
@@ -232,6 +237,22 @@ class GridTrader:
                 logger.warning("order placement failed: %s", e)
             slots[idx] = Slot(None, None)
 
+    async def _cancel_slot(self, slots: List[Slot], idx: int) -> None:
+        slot = slots[idx]
+        if not slot.external_id:
+            slots[idx] = Slot(None, None)
+            return
+
+        async def _cancel():
+            return await self.client.cancel_order(order_external_id=slot.external_id)
+
+        try:
+            await call_with_retries(_cancel, limiter=self._limiter)
+        except Exception as e:
+            if not self._is_edit_not_found(e):
+                logger.warning("order cancel failed: %s", e)
+        slots[idx] = Slot(None, None)
+
     async def _update_grid(self, mid: Decimal) -> None:
         if self._tick is None:
             return
@@ -245,24 +266,33 @@ class GridTrader:
             sell_px = (mid + self.grid_step * level).quantize(
                 self._tick, rounding=ROUND_CEILING
             )
-            buy_tasks.append(
-                self._ensure_order(self._buy_slots, OrderSide.BUY, i, buy_px)
-            )
-            sell_tasks.append(
-                self._ensure_order(self._sell_slots, OrderSide.SELL, i, sell_px)
-            )
+            if self.min_price <= buy_px <= self.max_price:
+                buy_tasks.append(
+                    self._ensure_order(self._buy_slots, OrderSide.BUY, i, buy_px)
+                )
+            else:
+                buy_tasks.append(self._cancel_slot(self._buy_slots, i))
+            if self.min_price <= sell_px <= self.max_price:
+                sell_tasks.append(
+                    self._ensure_order(self._sell_slots, OrderSide.SELL, i, sell_px)
+                )
+            else:
+                sell_tasks.append(self._cancel_slot(self._sell_slots, i))
         await asyncio.gather(*buy_tasks, *sell_tasks)
 
 
 # ----------------------------------------------------------------------
 async def main():
     account = TradingAccount()
+    grid_step = (GRID_MAX_PRICE - GRID_MIN_PRICE) / (2 * GRID_LEVELS)
     trader = GridTrader(
         account=account,
         market_name=MARKET_NAME,
-        grid_step=GRID_STEP_USD,
+        grid_step=grid_step,
         level_count=GRID_LEVELS,
         order_size_usd=GRID_SIZE_USD,
+        lower_bound=GRID_MIN_PRICE,
+        upper_bound=GRID_MAX_PRICE,
     )
 
     loop = asyncio.get_running_loop()

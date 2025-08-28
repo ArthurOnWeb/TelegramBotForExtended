@@ -99,6 +99,7 @@ class GridTrader:
         self._best_ask: Decimal | None = None
         self._closing = asyncio.Event()
         self._refresh_task: asyncio.Task | None = None
+        self._grid_active = True
 
     # ------------------------------------------------------------------
     async def _queue_update(self, mid: Decimal) -> None:
@@ -287,6 +288,30 @@ class GridTrader:
     async def _update_grid(self, mid: Decimal) -> None:
         if self._tick is None:
             return
+        if mid < self.min_price or mid > self.max_price:
+            if self._grid_active:
+                logger.warning(
+                    "mid price %s outside range [%s, %s]; grid inactive",
+                    mid,
+                    self.min_price,
+                    self.max_price,
+                )
+                self._grid_active = False
+            cancel_tasks = []
+            for i in range(self.level_count):
+                cancel_tasks.append(self._cancel_slot(self._buy_slots, i))
+                cancel_tasks.append(self._cancel_slot(self._sell_slots, i))
+            await asyncio.gather(*cancel_tasks)
+            return
+        elif not self._grid_active:
+            logger.info(
+                "mid price %s back inside range [%s, %s]; resuming grid",
+                mid,
+                self.min_price,
+                self.max_price,
+            )
+            self._grid_active = True
+
         buy_tasks = []
         sell_tasks = []
         for i in range(self.level_count):
@@ -296,6 +321,8 @@ class GridTrader:
                 buy_px = (mid - self.grid_step * level).quantize(
                     self._tick, rounding=ROUND_FLOOR
                 )
+                if buy_px < self.min_price or buy_px > self.max_price:
+                    buy_px = None
             else:
                 buy_px = buy_slot.price
             if buy_px is not None and self.min_price <= buy_px <= self.max_price:
@@ -310,6 +337,8 @@ class GridTrader:
                 sell_px = (mid + self.grid_step * level).quantize(
                     self._tick, rounding=ROUND_CEILING
                 )
+                if sell_px < self.min_price or sell_px > self.max_price:
+                    sell_px = None
             else:
                 sell_px = sell_slot.price
             if sell_px is not None and self.min_price <= sell_px <= self.max_price:

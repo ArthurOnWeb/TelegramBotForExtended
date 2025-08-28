@@ -56,6 +56,8 @@ REFRESH_INTERVAL_SEC = float(os.getenv("MM_REFRESH_INTERVAL", "5"))
 MAX_OB_AGE_SEC = float(os.getenv("MM_OB_MAX_AGE", "15"))
 # Warn if order placement takes longer than this many seconds
 PLACE_WARN_SEC = float(os.getenv("MM_PLACE_WARN_SEC", "5"))
+# Use initial best price as anchor instead of live best when enabled
+STATIC_GRID = os.getenv("MM_STATIC_GRID", "0") == "1"
 
 
 @dataclass
@@ -92,6 +94,15 @@ class MarketMaker:
 
         # Serialize order placement to avoid concurrent create/replace calls
         self._placement_lock = asyncio.Lock()
+
+        self._static_grid = STATIC_GRID
+        self._buy_anchor: Decimal | None = None
+        self._sell_anchor: Decimal | None = None
+
+    def reset_anchor(self) -> None:
+        """Reset stored anchor prices for static grid mode."""
+        self._buy_anchor = None
+        self._sell_anchor = None
 
     async def _create_order_book(self) -> OrderBook:
         return await OrderBook.create(
@@ -438,11 +449,20 @@ class MarketMaker:
             slot = slots[idx]
             order_id = slot.external_id
 
-            # offset in ticks based on idx
             tick = self._tick
             rel = (Decimal(1) + Decimal(idx)) / OFFSET_DIVISOR
             direction = Decimal(1 if side == OrderSide.SELL else -1)
-            candidate = best_px * (Decimal(1) + direction * rel)
+
+            base_px = best_px
+            if self._static_grid:
+                anchor_attr = "_sell_anchor" if side == OrderSide.SELL else "_buy_anchor"
+                anchor = getattr(self, anchor_attr)
+                if anchor is None:
+                    setattr(self, anchor_attr, best_px)
+                    anchor = best_px
+                base_px = anchor
+
+            candidate = base_px * (Decimal(1) + direction * rel)
 
             adjusted_price = candidate.quantize(
                 tick, rounding=(ROUND_CEILING if side == OrderSide.SELL else ROUND_FLOOR)

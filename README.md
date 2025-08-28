@@ -109,6 +109,9 @@ MM_TARGET_USD=250
 # Offset = (1+idx)/OFFSET_DIVISOR
 MM_OFFSET_DIVISOR=400
 
+# When set to 1, anchor levels to the first seen best price
+MM_STATIC_GRID=0
+
 # Max concurrent in-flight order requests
 MM_MAX_IN_FLIGHT=4
 
@@ -123,6 +126,10 @@ MM_MARKET_MAKER=0
 # MM_RATE_LIMIT_RPS=16
 # MM_RATE_LIMIT_BURST=32
 ```
+
+`MM_STATIC_GRID=1` locks quote offsets to the first seen best bid/ask. Call
+`MarketMaker.reset_anchor()` (or restart the bot) to re-anchor after a large
+price move.
 
 > `account.py` currently uses the **StarkNet Mainnet** endpoint.
 > If you want Testnet, switch to `STARKNET_TESTNET_CONFIG` there or add an env toggle.

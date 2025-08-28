@@ -32,10 +32,10 @@ from utils import logger
 # configured without modifying the source.  If ``GRID_MARKET`` is not provided
 # interactively ask the user which market to trade on.
 MARKET_NAME = os.getenv("GRID_MARKET") or input("Market ? ")
-GRID_LEVELS = int(os.getenv("GRID_LEVELS", "3"))  or int(input("how many Levels ? "))
+GRID_LEVELS = int(os.getenv("GRID_LEVELS"))  or int(input("how many Levels ? "))
 GRID_SIZE_USD = Decimal(os.getenv("GRID_SIZE_USD", "25"))
-GRID_MIN_PRICE = Decimal(os.getenv("GRID_MIN_PRICE", "0")) or Decimal(input("Min Price ? "))
-GRID_MAX_PRICE = Decimal(os.getenv("GRID_MAX_PRICE", "0")) or Decimal (input("Max Price ? "))
+GRID_MIN_PRICE = Decimal(os.getenv("GRID_MIN_PRICE")) or Decimal(input("Min Price ? "))
+GRID_MAX_PRICE = Decimal(os.getenv("GRID_MAX_PRICE")) or Decimal (input("Max Price ? "))
 REFRESH_INTERVAL_SEC = float(os.getenv("GRID_REFRESH_SEC", "5"))
 
 

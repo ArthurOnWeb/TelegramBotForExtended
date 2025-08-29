@@ -206,9 +206,22 @@ class GridTrader:
 
         try:
             async with self._placement_lock:
-                await call_with_retries(
+                result = await call_with_retries(
                     lambda: _place(previous_id, price, side), limiter=self._limiter
                 )
+            if not result or getattr(result, "error", None) or not getattr(result, "data", None):
+                logger.error(
+                    "create_and_place_order failed | market=%s side=%s idx=%d price=%s prev_id=%s ext_id=%s error=%s data=%s",
+                    self._market.name if self._market else "?",
+                    side.name,
+                    idx,
+                    str(price),
+                    previous_id,
+                    new_external_id,
+                    getattr(result, "error", None) if result else None,
+                    getattr(result, "data", None) if result else None,
+                )
+                raise RuntimeError(getattr(result, "error", "empty response"))
             slots[idx] = Slot(new_external_id, price, side)
         except Exception as e:
             msg = str(e).lower()

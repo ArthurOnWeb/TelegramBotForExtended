@@ -217,16 +217,22 @@ class GridTrader:
                     async_client = self.account.get_async_client()
                     resp = await call_with_retries(
                         lambda: async_client.account.get_open_orders(
-                            market_names=[self._market.name],
-                            external_ids=[new_external_id],
+                            market_names=[self._market.name]
                         ),
                         limiter=self._limiter,
                     )
-                    orders = resp.data or []
-                    if orders:
-                        order = orders[0]
-                        slots[idx] = Slot(order.external_id, order.price, order.side)
-                        return
+                    open_orders = resp.data or []
+                    # Filter locally by external_id to support SDKs
+                    for order in open_orders:
+                        if getattr(order, "external_id", None) == new_external_id:
+                            slots[idx] = Slot(order.external_id, order.price, side)
+                            return
+                    # Not found by external_id; as a fallback, check for same side/price
+                    for order in open_orders:
+                        if getattr(order, "price", None) == price and getattr(order, "side", None) in (getattr(side, "name", None), side):
+                            slots[idx] = Slot(order.external_id, order.price, side)
+                            return
+                    return
                 except Exception as e3:
                     logger.exception(
                         "reconcile after hash-duplicate failed | market=%s side=%s idx=%d ext_id=%s",
@@ -351,7 +357,10 @@ async def main():
         try:
             loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(trader.stop()))
         except NotImplementedError:
-            pass
+            # Fallback for platforms without loop signal handlers (e.g. Windows)
+            # Use a sync signal handler to request shutdown via the closing flag;
+            # the main loop will exit and the finally block will call stop().
+            signal.signal(sig, lambda s, f, lp=loop: lp.call_soon_threadsafe(trader._closing.set))
 
     await trader.start()
     print(f"[grid] started on {MARKET_NAME}")

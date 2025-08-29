@@ -33,7 +33,8 @@ import logging
 # configured without modifying the source.  If ``GRID_MARKET`` is not provided
 # interactively ask the user which market to trade on.
 MARKET_NAME = os.getenv("GRID_MARKET") or input("Market ? ")
-GRID_LEVELS = int(os.getenv("GRID_LEVELS"))  or int(input("how many Levels ? "))
+# Parse levels robustly: avoid int(None) when env is unset
+GRID_LEVELS = int(os.getenv("GRID_LEVELS") or input("how many Levels ? "))
 GRID_SIZE_USD = Decimal(os.getenv("GRID_SIZE_USD", "25"))
 GRID_MIN_PRICE = Decimal(os.getenv("GRID_MIN_PRICE") or input("Min Price ? "))
 GRID_MAX_PRICE = Decimal(os.getenv("GRID_MAX_PRICE") or input("Max Price ? "))
@@ -245,39 +246,48 @@ class GridTrader:
                 # Could not confirm; clear slot to retry later
                 slots[idx] = Slot(None, None, side)
                 return
+            # Known SDK race: transient RuntimeError("Lock is not acquired")
+            elif isinstance(e, RuntimeError) and "lock is not acquired" in msg:
+                # Treat as transient; try again on next refresh without clearing the slot
+                logger.warning("transient SDK lock glitch; will retry | side=%s idx=%d", side.name, idx)
+                return
             elif self._is_edit_not_found(e):
-                new_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
-                new_price = (
-                    (price + self.grid_step)
-                    if side == OrderSide.BUY
-                    else (price - self.grid_step)
-                )
-                if self._tick is not None:
-                    new_price = new_price.quantize(
-                        self._tick,
-                        rounding=ROUND_CEILING
-                        if new_side == OrderSide.SELL
-                        else ROUND_FLOOR,
+                # Previous external_id not recognised → send a fresh create at the same price/side
+                try:
+                    async with self._placement_lock:
+                        await call_with_retries(
+                            lambda: _place(None, price, side),
+                            limiter=self._limiter,
+                        )
+                    slots[idx] = Slot(new_external_id, price, side)
+                    return
+                except Exception as e2:
+                    logger.exception(
+                        "order placement fresh-create failed | market=%s side=%s idx=%d price=%s",
+                        self._market.name if self._market else "?",
+                        side.name,
+                        idx,
+                        str(price),
                     )
-                new_synthetic = _order_size(new_price)
-                if new_synthetic >= min_size:
+            # Post-only rejections: nudge away by one tick and try once
+            elif ("post-only" in msg) or ("would cross" in msg) or ("immediate match" in msg):
+                if self._tick is not None:
+                    adj = price + (self._tick if side == OrderSide.SELL else -self._tick)
                     try:
                         async with self._placement_lock:
                             await call_with_retries(
-                                lambda: _place(None, new_price, new_side),
+                                lambda: _place(None, adj, side),
                                 limiter=self._limiter,
                             )
-                        slots[idx] = Slot(new_external_id, new_price, new_side)
+                        slots[idx] = Slot(new_external_id, adj, side)
                         return
-                    except Exception as e2:
+                    except Exception:
                         logger.exception(
-                            "order placement retry failed | market=%s side=%s idx=%d price=%s new_side=%s new_price=%s",
+                            "order placement post-only adjust failed | market=%s side=%s idx=%d price=%s",
                             self._market.name if self._market else "?",
                             side.name,
                             idx,
                             str(price),
-                            new_side.name,
-                            str(new_price),
                         )
             else:
                 logger.exception(

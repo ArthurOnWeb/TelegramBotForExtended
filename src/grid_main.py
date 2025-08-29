@@ -209,7 +209,36 @@ class GridTrader:
                 )
             slots[idx] = Slot(new_external_id, price, side)
         except Exception as e:
-            if self._is_edit_not_found(e):
+            msg = str(e).lower()
+            # If backend reports the same order hash was already placed, assume
+            # it succeeded on a previous attempt and reconcile by querying it.
+            if "hash already placed" in msg:
+                try:
+                    async_client = self.account.get_async_client()
+                    resp = await call_with_retries(
+                        lambda: async_client.account.get_open_orders(
+                            market_names=[self._market.name],
+                            external_ids=[new_external_id],
+                        ),
+                        limiter=self._limiter,
+                    )
+                    orders = resp.data or []
+                    if orders:
+                        order = orders[0]
+                        slots[idx] = Slot(order.external_id, order.price, order.side)
+                        return
+                except Exception as e3:
+                    logger.exception(
+                        "reconcile after hash-duplicate failed | market=%s side=%s idx=%d ext_id=%s",
+                        self._market.name if self._market else "?",
+                        side.name,
+                        idx,
+                        new_external_id,
+                    )
+                # Could not confirm; clear slot to retry later
+                slots[idx] = Slot(None, None, side)
+                return
+            elif self._is_edit_not_found(e):
                 new_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
                 new_price = (
                     (price + self.grid_step)

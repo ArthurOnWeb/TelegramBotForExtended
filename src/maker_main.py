@@ -17,7 +17,7 @@ from account import TradingAccount
 from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
 from id_generator import uuid_external_id
-from utils import logger
+from utils import logger, setup_logging, logging
 
 
 # --- Paramètres de prod (surcouchables par variables d'env) ---
@@ -571,6 +571,8 @@ async def main():
             # Windows / environnements restreints
             pass
 
+    # Initialize logging so warnings/errors are visible in console
+    setup_logging(logging.INFO)
     await maker.start()
     print(f"[maker] started on {MARKET_NAME}")
 
@@ -584,4 +586,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

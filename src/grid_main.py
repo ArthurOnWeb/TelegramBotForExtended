@@ -24,7 +24,7 @@ from account import TradingAccount
 from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
 from id_generator import uuid_external_id
-from utils import logger
+from utils import logger, setup_logging, logging
 
 # --- Configuration ----------------------------------------------------------------------
 
@@ -234,9 +234,25 @@ class GridTrader:
                         slots[idx] = Slot(new_external_id, new_price, new_side)
                         return
                     except Exception as e2:
-                        logger.warning("order placement failed: %s", e2)
+                        logger.exception(
+                            "order placement retry failed | market=%s side=%s idx=%d price=%s new_side=%s new_price=%s",
+                            self._market.name if self._market else "?",
+                            side.name,
+                            idx,
+                            str(price),
+                            new_side.name,
+                            str(new_price),
+                        )
             else:
-                logger.warning("order placement failed: %s", e)
+                logger.exception(
+                    "order placement failed | market=%s side=%s idx=%d price=%s prev_id=%s ext_id=%s",
+                    self._market.name if self._market else "?",
+                    side.name,
+                    idx,
+                    str(price),
+                    previous_id,
+                    new_external_id,
+                )
             slots[idx] = Slot(None, None, side)
 
     async def _cancel_slot(self, slots: List[Slot], idx: int) -> None:
@@ -252,7 +268,12 @@ class GridTrader:
             await call_with_retries(_cancel, limiter=self._limiter)
         except Exception as e:
             if not self._is_edit_not_found(e):
-                logger.warning("order cancel failed: %s", e)
+                logger.exception(
+                    "order cancel failed | market=%s idx=%d ext_id=%s",
+                    self._market.name if self._market else "?",
+                    idx,
+                    slot.external_id,
+                )
         slots[idx] = Slot(None, None, slot.side)
 
     async def _update_grid(self) -> None:
@@ -283,6 +304,8 @@ class GridTrader:
 # ----------------------------------------------------------------------
 async def main():
     account = TradingAccount()
+    # Ensure logging is configured so warnings/errors are visible
+    setup_logging(logging.INFO)
     grid_step = (GRID_MAX_PRICE - GRID_MIN_PRICE) / (2 * GRID_LEVELS)
     trader = GridTrader(
         account=account,

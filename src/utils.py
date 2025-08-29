@@ -5,14 +5,28 @@ from x10.perpetual.trading_client import PerpetualTradingClient
 logger = logging.getLogger("extended_bot")
 
 def setup_logging(log_level: int = logging.INFO):
-    """Initialise logger"""
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            logging.StreamHandler()
-        ]
-    )
+    """Initialise console logging reliably.
+
+    - Forces root logging configuration so third-party defaults don’t suppress output.
+    - Attaches a StreamHandler to our named logger and disables propagation to avoid duplicates.
+    """
+    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+    # Force root configuration (Python 3.8+)
+    try:
+        logging.basicConfig(level=log_level, format=fmt, force=True)
+    except TypeError:
+        # Older Python: best effort without force
+        logging.basicConfig(level=log_level, format=fmt)
+
+    # Ensure our app logger has a console handler regardless of root state
+    logger.setLevel(log_level)
+    logger.propagate = False
+    if not logger.handlers:
+        h = logging.StreamHandler()
+        h.setLevel(log_level)
+        h.setFormatter(logging.Formatter(fmt))
+        logger.addHandler(h)
 
 async def clean_account(trading_client: PerpetualTradingClient, verbose: bool = False):
     """

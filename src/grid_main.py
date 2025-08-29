@@ -114,6 +114,7 @@ class GridTrader:
 
     # ------------------------------------------------------------------
     async def start(self) -> None:
+        setup_logging(logging.INFO)
         markets = await self.client.get_markets()
         if self.market_name not in markets:
             raise RuntimeError(f"Market {self.market_name} introuvable.")
@@ -163,6 +164,13 @@ class GridTrader:
     async def _refresh_loop(self) -> None:
         while not self._closing.is_set():
             await self._update_grid()
+            active_buys = sum(1 for s in self._buy_slots if s.external_id)
+            active_sells = sum(1 for s in self._sell_slots if s.external_id)
+            logger.info(
+                "grid refresh | active_buys=%d active_sells=%d",
+                active_buys,
+                active_sells,
+            )
             await asyncio.sleep(REFRESH_INTERVAL_SEC)
 
     # ------------------------------------------------------------------

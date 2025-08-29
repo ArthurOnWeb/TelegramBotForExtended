@@ -24,7 +24,8 @@ from account import TradingAccount
 from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
 from id_generator import uuid_external_id
-from utils import logger, setup_logging, logging
+from utils import logger, setup_logging
+import logging
 
 # --- Configuration ----------------------------------------------------------------------
 
@@ -341,8 +342,6 @@ async def main():
     # Ensure logging is configured so warnings/errors are visible
     setup_logging(logging.INFO)
     account = TradingAccount()
-    # Ensure logging is configured so warnings/errors are visible
-    setup_logging(logging.INFO)
     grid_step = (GRID_MAX_PRICE - GRID_MIN_PRICE) / (2 * GRID_LEVELS)
     trader = GridTrader(
         account=account,
@@ -365,14 +364,14 @@ async def main():
             signal.signal(sig, lambda s, f, lp=loop: lp.call_soon_threadsafe(trader._closing.set))
 
     await trader.start()
-    print(f"[grid] started on {MARKET_NAME}")
+    logger.info("[grid] started on %s", MARKET_NAME)
 
     try:
         while not trader._closing.is_set():
             await asyncio.sleep(1.0)
     finally:
         await trader.stop()
-        print("[grid] stopped.")
+        logger.info("[grid] stopped.")
 
 
 if __name__ == "__main__":

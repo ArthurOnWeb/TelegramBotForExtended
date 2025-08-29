@@ -338,9 +338,9 @@ class GridTrader:
 
 # ----------------------------------------------------------------------
 async def main():
-    account = TradingAccount()
     # Ensure logging is configured so warnings/errors are visible
     setup_logging(logging.INFO)
+    account = TradingAccount()
     grid_step = (GRID_MAX_PRICE - GRID_MIN_PRICE) / (2 * GRID_LEVELS)
     trader = GridTrader(
         account=account,

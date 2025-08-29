@@ -222,6 +222,18 @@ class GridTrader:
                     getattr(result, "data", None) if result else None,
                 )
                 raise RuntimeError(getattr(result, "error", "empty response"))
+            status = getattr(getattr(result, "data", None), "status", None)
+            if status != "PLACED":
+                logger.error(
+                    "order rejected | market=%s side=%s idx=%d price=%s status=%s",
+                    self._market.name if self._market else "?",
+                    side.name,
+                    idx,
+                    str(price),
+                    status,
+                )
+                slots[idx] = Slot(None, None, side)
+                return
             slots[idx] = Slot(new_external_id, price, side)
         except Exception as e:
             msg = str(e).lower()

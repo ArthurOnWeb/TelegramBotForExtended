@@ -40,7 +40,7 @@ def setup_logging(log_level: Optional[Union[int, str]] = None) -> None:
     # Ensure our app logger is always usable and not duplicated
     logger.setLevel(level)
     logger.propagate = False
-    if not logger.handlers:
+    if all(isinstance(h, logging.NullHandler) for h in logger.handlers):
         h = logging.StreamHandler()
         h.setLevel(level)
         h.setFormatter(logging.Formatter(fmt))

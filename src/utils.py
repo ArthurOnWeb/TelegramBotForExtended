@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Optional, Union
+from typing import Optional, Union, Any
 from x10.perpetual.trading_client import PerpetualTradingClient
 
 logger = logging.getLogger("extended_bot")
@@ -68,3 +68,24 @@ async def clean_account(trading_client: PerpetualTradingClient, verbose: bool = 
         logger.info("Cancel %d waiting orders.", len(order_ids))
     else:
         logger.info("No orders to cancel.")
+
+
+async def close_orderbook(orderbook: Any) -> None:
+    """Gracefully close an OrderBook regardless of SDK version.
+
+    The X10 SDK has changed the shutdown method name across releases.  This
+    helper attempts the available variants in order of preference and quietly
+    ignores errors so callers can rely on it without littering their code with
+    attribute checks.
+    """
+    if not orderbook:
+        return
+    try:
+        if hasattr(orderbook, "stop_orderbook"):
+            await orderbook.stop_orderbook()
+        elif hasattr(orderbook, "aclose"):
+            await orderbook.aclose()
+        else:
+            await orderbook.close()
+    except Exception as exc:  # pragma: no cover - best effort cleanup
+        logger.debug("error closing orderbook: %s", exc)

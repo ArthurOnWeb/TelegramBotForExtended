@@ -1,5 +1,6 @@
 from x10.perpetual.orderbook import OrderBook
 from x10.perpetual.configuration import MAINNET_CONFIG
+from utils import close_orderbook
 
 
 class OrderBookWatcher:
@@ -27,12 +28,7 @@ class OrderBookWatcher:
         if not ob:
             return
         try:
-            if hasattr(ob, "stop_orderbook"):
-                await ob.stop_orderbook()
-            elif hasattr(ob, "aclose"):
-                await ob.aclose()
-            else:
-                await ob.close()
+            await close_orderbook(ob)
         finally:
             self.orderbook = None
 

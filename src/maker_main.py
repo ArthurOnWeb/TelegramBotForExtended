@@ -17,7 +17,7 @@ from account import TradingAccount
 from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
 from id_generator import uuid_external_id
-from utils import logger, setup_logging, logging
+from utils import logger, setup_logging, logging, close_orderbook
 
 
 # --- Paramètres de prod (surcouchables par variables d'env) ---
@@ -150,7 +150,8 @@ class MarketMaker:
                 pass
 
         if self._order_book:
-            await self._order_book.close()
+            await close_orderbook(self._order_book)
+            self._order_book = None
         await self.account.close()
 
     MM_PREFIX = "mm_"
@@ -402,12 +403,7 @@ class MarketMaker:
             is_closed = bool(getattr(ob, "is_closed", False) or getattr(ob, "closed", False))
             if age > MAX_OB_AGE_SEC or is_closed:
                 try:
-                    if hasattr(ob, "stop_orderbook"):
-                        await ob.stop_orderbook()
-                    elif hasattr(ob, "aclose"):
-                        await ob.aclose()
-                    else:
-                        await ob.close()
+                    await close_orderbook(ob)
                 except Exception:
                     logger.exception("Error shutting down stale OrderBook")
                 self._order_book = await self._create_order_book()

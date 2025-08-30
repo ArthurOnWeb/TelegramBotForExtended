@@ -32,7 +32,7 @@ from account import TradingAccount
 from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
 from id_generator import uuid_external_id
-from utils import logger,setup_logging,logging
+from utils import logger,setup_logging,logging, close_orderbook
 from regime.calibration import VolatilityCalibrator
 from strategy.quoting import Quoter
 
@@ -218,7 +218,8 @@ class HybridTrader:
                     pass
 
         if self._order_book:
-            await self._order_book.close()
+            await close_orderbook(self._order_book)
+            self._order_book = None
         await self.account.close()
 
     # ------------------------------------------------------------------

@@ -146,3 +146,64 @@ async def test_start_aborts_when_mid_outside_bounds(monkeypatch):
     with pytest.raises(RuntimeError):
         await trader.start()
 
+
+class StubOrderBookNoClose:
+    def __init__(self, bid: Decimal, ask: Decimal):
+        self._bid = bid
+        self._ask = ask
+        self.stopped = False
+
+    def best_bid(self):
+        return SimpleNamespace(price=self._bid)
+
+    def best_ask(self):
+        return SimpleNamespace(price=self._ask)
+
+    async def stop_orderbook(self):
+        self.stopped = True
+
+
+@pytest.mark.asyncio
+async def test_start_closes_without_close_method(monkeypatch):
+    """GridTrader should handle OrderBook lacking a ``close`` method."""
+
+    async def fake_get_markets():
+        market = SimpleNamespace(
+            name="TEST-USD",
+            trading_config=SimpleNamespace(price_precision=1),
+        )
+        return {"TEST-USD": market}
+
+    async def fake_mass_cancel(markets=None):  # pragma: no cover - simple stub
+        return None
+
+    client = SimpleNamespace(get_markets=fake_get_markets, mass_cancel=fake_mass_cancel)
+    account = StubAccount(client)
+
+    async def fake_call_with_retries(fn, limiter=None):
+        return await fn()
+
+    monkeypatch.setattr("grid_main.call_with_retries", fake_call_with_retries)
+
+    ob = StubOrderBookNoClose(Decimal("99"), Decimal("101"))
+
+    async def fake_create_order_book(self):
+        return ob
+
+    monkeypatch.setattr(GridTrader, "_create_order_book", fake_create_order_book)
+
+    trader = GridTrader(
+        account=account,
+        market_name="TEST-USD",
+        grid_step=Decimal("10"),
+        level_count=2,
+        order_size_usd=Decimal("10"),
+        lower_bound=Decimal("120"),
+        upper_bound=Decimal("130"),
+    )
+
+    with pytest.raises(RuntimeError):
+        await trader.start()
+
+    assert ob.stopped
+

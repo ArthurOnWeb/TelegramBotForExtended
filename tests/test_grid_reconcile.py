@@ -133,3 +133,54 @@ async def test_update_grid_cancels_orphans(monkeypatch, caplog):
     assert any(c.get("order_external_id") == "orphan" for c in cancel_calls)
     assert any(c.get("order_id") == 3 for c in cancel_calls)
     assert any("reconcile cancel orphan order" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_update_grid_logs_fetch_failure(monkeypatch, caplog):
+    trader = GridTrader(
+        account=StubAccount(),
+        market_name="TEST-USD",
+        grid_step=Decimal("1"),
+        level_count=1,
+        order_size_usd=Decimal("10"),
+        lower_bound=Decimal("0"),
+        upper_bound=Decimal("100"),
+    )
+    trader._market = SimpleNamespace(
+        name="TEST-USD",
+        trading_config=SimpleNamespace(
+            calculate_order_size_from_value=lambda value, price: value / price,
+            min_order_size=Decimal("0"),
+        ),
+    )
+    trader._tick = Decimal("1")
+    trader._slots = [Slot("tracked", Decimal("10"), OrderSide.BUY)]
+    trader._buy_slots = trader._slots
+
+    async def fake_get_open_orders(market_names=None):
+        raise RuntimeError("boom")
+
+    trader.account.get_async_client = lambda: SimpleNamespace(
+        account=SimpleNamespace(get_open_orders=fake_get_open_orders)
+    )
+
+    cancel_calls = []
+
+    async def fake_cancel_order(**kwargs):
+        cancel_calls.append(kwargs)
+
+    trader.client = SimpleNamespace(cancel_order=fake_cancel_order)
+
+    async def fake_call_with_retries(fn, limiter=None):
+        return await fn()
+
+    monkeypatch.setattr("grid_main.call_with_retries", fake_call_with_retries)
+
+    caplog.set_level(logging.ERROR, logger="extended_bot")
+
+    await trader._update_grid()
+
+    assert cancel_calls == []
+    assert any(
+        "reconcile fetch open orders failed" in rec.message for rec in caplog.records
+    )

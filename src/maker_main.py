@@ -17,7 +17,7 @@ from account import TradingAccount
 from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
 from id_generator import uuid_external_id
-from utils import logger, setup_logging, logging
+from utils import logger, setup_logging, logging, _close_order_book
 
 
 # --- Paramètres de prod (surcouchables par variables d'env) ---
@@ -150,7 +150,7 @@ class MarketMaker:
                 pass
 
         if self._order_book:
-            await self._order_book.close()
+            await _close_order_book(self._order_book)
         await self.account.close()
 
     MM_PREFIX = "mm_"

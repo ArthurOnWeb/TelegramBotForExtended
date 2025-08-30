@@ -350,14 +350,53 @@ class GridTrader:
 
             status = getattr(order, "status", None)
             if status != "PLACED":
+                reason = (
+                    getattr(order, "reason", None)
+                    or getattr(order, "cancel_reason", None)
+                    or getattr(order, "cancelReason", None)
+                )
                 logger.error(
-                    "order rejected | market=%s side=%s idx=%d price=%s status=%s",
+                    "order rejected | market=%s side=%s idx=%d price=%s status=%s reason=%s",
                     self._market.name if self._market else "?",
                     side.name,
                     idx,
                     str(price),
                     status,
+                    reason,
                 )
+                retry_msg = (str(reason).lower() if reason else "")
+                if (
+                    status in ("REJECTED", "CANCELED")
+                    and self._tick is not None
+                    and (
+                        "post-only" in retry_msg
+                        or "would cross" in retry_msg
+                        or "immediate match" in retry_msg
+                    )
+                ):
+                    adj = price + (
+                        self._tick if side == OrderSide.SELL else -self._tick
+                    )
+                    try:
+                        async with self._placement_lock:
+                            result2 = await call_with_retries(
+                                lambda: _place(None, adj, side),
+                                limiter=self._limiter,
+                            )
+                        order2 = getattr(result2, "data", None)
+                        if order2 is None and getattr(result2, "status", None):
+                            order2 = result2
+                        if getattr(order2, "status", None) == "PLACED":
+                            slots[idx] = Slot(new_external_id, adj, side)
+                            return
+                    except Exception:
+                        logger.exception(
+                            "order placement post-only adjust failed | market=%s side=%s idx=%d price=%s",
+                            self._market.name if self._market else "?",
+                            side.name,
+                            idx,
+                            str(price),
+                        )
                 if previous_id:
                     try:
                         await self._cancel_slot(slots, idx)

@@ -252,6 +252,17 @@ class GridTrader:
                     str(price),
                     status,
                 )
+                if previous_id:
+                    try:
+                        await self._cancel_slot(slots, idx)
+                    except Exception:
+                        logger.exception(
+                            "previous order cancel failed | market=%s side=%s idx=%d ext_id=%s",
+                            self._market.name if self._market else "?",
+                            side.name,
+                            idx,
+                            previous_id,
+                        )
                 slots[idx] = Slot(None, price, side)
                 return
             slots[idx] = Slot(new_external_id, price, side)
@@ -289,6 +300,17 @@ class GridTrader:
                         new_external_id,
                     )
                 # Could not confirm; clear slot to retry later
+                if previous_id:
+                    try:
+                        await self._cancel_slot(slots, idx)
+                    except Exception:
+                        logger.exception(
+                            "previous order cancel failed | market=%s side=%s idx=%d ext_id=%s",
+                            self._market.name if self._market else "?",
+                            side.name,
+                            idx,
+                            previous_id,
+                        )
                 slots[idx] = Slot(None, price, side)
                 return
             # Known SDK race: transient RuntimeError("Lock is not acquired")
@@ -344,6 +366,17 @@ class GridTrader:
                     previous_id,
                     new_external_id,
                 )
+            if previous_id:
+                try:
+                    await self._cancel_slot(slots, idx)
+                except Exception:
+                    logger.exception(
+                        "previous order cancel failed | market=%s side=%s idx=%d ext_id=%s",
+                        self._market.name if self._market else "?",
+                        side.name,
+                        idx,
+                        previous_id,
+                    )
             slots[idx] = Slot(None, price, side)
 
     async def _cancel_slot(self, slots: List[Slot], idx: int) -> None:
@@ -397,9 +430,33 @@ class GridTrader:
                 limiter=self._limiter,
             )
             open_orders = resp.data or []
-            open_ids = {
-                getattr(o, "external_id", "") for o in open_orders if getattr(o, "external_id", None)
+            expected_ids = {
+                s.external_id for s in self._slots if getattr(s, "external_id", None)
             }
+            for order in open_orders:
+                ext_id = getattr(order, "external_id", None)
+                if not ext_id or ext_id not in expected_ids:
+                    async def _cancel(order=order):
+                        if getattr(order, "external_id", None):
+                            return await self.client.cancel_order(order_external_id=order.external_id)
+                        return await self.client.cancel_order(order_id=order.id)
+                    try:
+                        await call_with_retries(_cancel, limiter=self._limiter)
+                        logger.warning(
+                            "reconcile cancel orphan order | market=%s ext_id=%s id=%s",
+                            self._market.name if self._market else "?",
+                            ext_id,
+                            getattr(order, "id", None),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "reconcile cancel failed | market=%s ext_id=%s id=%s",
+                            self._market.name if self._market else "?",
+                            ext_id,
+                            getattr(order, "id", None),
+                        )
+                else:
+                    open_ids.add(ext_id)
         except Exception:
             pass
 

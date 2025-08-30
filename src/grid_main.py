@@ -317,20 +317,38 @@ class GridTrader:
                 result = await call_with_retries(
                     lambda: _place(previous_id, price, side), limiter=self._limiter
                 )
-            if not result or getattr(result, "error", None) or not getattr(result, "data", None):
+            if getattr(result, "error", None):
                 logger.error(
-                    "create_and_place_order failed | market=%s side=%s idx=%d price=%s prev_id=%s ext_id=%s error=%s data=%s",
+                    "create_and_place_order failed | market=%s side=%s idx=%d price=%s prev_id=%s ext_id=%s error=%s",
                     self._market.name if self._market else "?",
                     side.name,
                     idx,
                     str(price),
                     previous_id,
                     new_external_id,
-                    getattr(result, "error", None) if result else None,
-                    getattr(result, "data", None) if result else None,
+                    getattr(result, "error", None),
                 )
-                raise RuntimeError(getattr(result, "error", "empty response"))
-            status = getattr(getattr(result, "data", None), "status", None)
+                raise RuntimeError(getattr(result, "error", "unknown"))
+
+            order = getattr(result, "data", None)
+            if order is None and getattr(result, "status", None):
+                order = result
+
+            if order is None:
+                logger.error(
+                    "create_and_place_order returned no data | market=%s side=%s idx=%d price=%s prev_id=%s ext_id=%s result=%s",
+                    self._market.name if self._market else "?",
+                    side.name,
+                    idx,
+                    str(price),
+                    previous_id,
+                    new_external_id,
+                    result,
+                )
+                slots[idx] = Slot(None, price, side)
+                return
+
+            status = getattr(order, "status", None)
             if status != "PLACED":
                 logger.error(
                     "order rejected | market=%s side=%s idx=%d price=%s status=%s",

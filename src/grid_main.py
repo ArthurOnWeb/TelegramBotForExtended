@@ -145,6 +145,37 @@ class GridTrader:
             if last is not None:
                 mid = Decimal(str(last))
         if mid is None:
+            # Final fallback: query ticker or recent trades via the client
+            price: Decimal | None = None
+            ticker_fn = getattr(self.client, "get_market_ticker", None)
+            if ticker_fn:
+                try:
+                    ticker = await ticker_fn(self._market.name)
+                    raw = getattr(ticker, "price", None) or getattr(
+                        ticker, "last_price", None
+                    )
+                    if raw is not None:
+                        price = Decimal(str(raw))
+                except Exception:
+                    price = None
+            if price is None:
+                trades_fn = getattr(self.client, "get_trades", None)
+                if trades_fn:
+                    try:
+                        trades = await trades_fn(self._market.name, limit=1)
+                        first = None
+                        if isinstance(trades, list):
+                            first = trades[0] if trades else None
+                        else:
+                            data = getattr(trades, "data", None)
+                            first = data[0] if data else None
+                        raw = getattr(first, "price", None) if first else None
+                        if raw is not None:
+                            price = Decimal(str(raw))
+                    except Exception:
+                        price = None
+            mid = price
+        if mid is None:
             if self._order_book:
                 await _close_order_book(self._order_book)
             raise RuntimeError("Unable to determine current mid price")

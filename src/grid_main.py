@@ -24,7 +24,7 @@ from account import TradingAccount
 from rate_limit import build_rate_limiter
 from backoff_utils import call_with_retries
 from id_generator import uuid_external_id
-from utils import logger, setup_logging
+from utils import logger, setup_logging, _close_order_book
 import logging
 
 # --- Configuration ----------------------------------------------------------------------
@@ -146,7 +146,7 @@ class GridTrader:
                 mid = Decimal(str(last))
         if mid is None:
             if self._order_book:
-                await self._order_book.close()
+                await _close_order_book(self._order_book)
             raise RuntimeError("Unable to determine current mid price")
 
         if mid <= self.min_price or mid >= self.max_price:
@@ -156,7 +156,7 @@ class GridTrader:
                 str(self.min_price),
                 str(self.max_price),
             )
-            await self._order_book.close()
+            await _close_order_book(self._order_book)
             self._order_book = None
             raise RuntimeError("grid bounds do not bracket current price")
 
@@ -196,7 +196,7 @@ class GridTrader:
             except asyncio.CancelledError:
                 pass
         if self._order_book:
-            await self._order_book.close()
+            await _close_order_book(self._order_book)
         await self.account.close()
 
     async def _refresh_loop(self) -> None:

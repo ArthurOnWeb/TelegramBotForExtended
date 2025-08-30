@@ -1,5 +1,6 @@
 import logging
 import os
+import inspect
 from typing import Optional, Union
 from x10.perpetual.trading_client import PerpetualTradingClient
 
@@ -7,6 +8,28 @@ logger = logging.getLogger("extended_bot")
 
 # Internal guard to avoid re-initialising logging repeatedly
 _LOGGING_CONFIGURED = False
+
+
+async def _close_order_book(ob) -> None:
+    """Close an order book using the safest available method.
+
+    Preference order:
+      1. ``stop_orderbook`` if defined (newer SDKs).
+      2. ``aclose`` if provided.
+      3. Fallback to ``close``.
+    The helper tolerates synchronous implementations of these methods.
+    """
+
+    if ob is None:
+        return
+
+    for name in ("stop_orderbook", "aclose", "close"):
+        method = getattr(ob, name, None)
+        if callable(method):
+            result = method()
+            if inspect.isawaitable(result):
+                await result
+            return
 
 def _resolve_level(level: Optional[Union[int, str]]) -> int:
     if isinstance(level, int):

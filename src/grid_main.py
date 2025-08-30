@@ -444,6 +444,12 @@ class GridTrader:
         if side == OrderSide.BUY:
             if idx + 1 < len(self._slots):
                 await self._switch_slot_to_side(idx + 1, OrderSide.SELL)
+                raw = self.min_price + self.grid_step * (idx + 2)
+                sell_price = raw.quantize(self._tick, rounding=ROUND_CEILING)
+                self._slots[idx + 1] = Slot(None, sell_price, OrderSide.SELL)
+                await self._ensure_order(
+                    self._slots, OrderSide.SELL, idx + 1, sell_price
+                )
         elif side == OrderSide.SELL and idx > 0:
             await self._switch_slot_to_side(idx - 1, OrderSide.BUY)
             await self._ensure_order(self._slots, OrderSide.BUY, idx - 1, self._slots[idx - 1].price)

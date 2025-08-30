@@ -552,7 +552,15 @@ class GridTrader:
                 else:
                     open_ids.add(ext_id)
         except Exception:
-            pass
+            logger.exception(
+                "reconcile fetch open orders failed | market=%s",
+                self._market.name if self._market else "?",
+            )
+            # Avoid triggering slot cancellation when we couldn't retrieve the
+            # current order state.  A brief pause reduces noisy logs if the
+            # failure persists.
+            await asyncio.sleep(0.1)
+            return
 
         tasks = []
         for i, slot in enumerate(self._slots):

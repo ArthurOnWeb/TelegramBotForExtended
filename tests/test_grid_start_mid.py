@@ -49,6 +49,19 @@ class StubOrderBook:
         pass
 
 
+class EmptyOrderBook:
+    """Order book stub returning no bid/ask prices."""
+
+    def best_bid(self):
+        return None
+
+    def best_ask(self):
+        return None
+
+    async def close(self):  # pragma: no cover - simple stub
+        pass
+
+
 @pytest.mark.asyncio
 async def test_start_uses_live_mid_for_sides(monkeypatch):
     async def fake_get_markets():
@@ -140,6 +153,115 @@ async def test_start_aborts_when_mid_outside_bounds(monkeypatch):
         level_count=2,
         order_size_usd=Decimal("10"),
         lower_bound=Decimal("120"),
+        upper_bound=Decimal("130"),
+    )
+
+    with pytest.raises(RuntimeError):
+        await trader.start()
+
+
+@pytest.mark.asyncio
+async def test_start_uses_ticker_when_order_book_empty(monkeypatch):
+    async def fake_get_markets():
+        market = SimpleNamespace(
+            name="TEST-USD",
+            trading_config=SimpleNamespace(price_precision=1),
+            last_price=None,
+            oracle_price=None,
+        )
+        return {"TEST-USD": market}
+
+    async def fake_mass_cancel(markets=None):  # pragma: no cover - simple stub
+        return None
+
+    async def fake_get_market_ticker(market_name):
+        return SimpleNamespace(price=Decimal("115"))
+
+    client = SimpleNamespace(
+        get_markets=fake_get_markets,
+        mass_cancel=fake_mass_cancel,
+        get_market_ticker=fake_get_market_ticker,
+    )
+    account = StubAccount(client)
+
+    async def fake_call_with_retries(fn, limiter=None):
+        return await fn()
+
+    monkeypatch.setattr("grid_main.call_with_retries", fake_call_with_retries)
+
+    async def fake_create_order_book(self):
+        return EmptyOrderBook()
+
+    monkeypatch.setattr(GridTrader, "_create_order_book", fake_create_order_book)
+
+    async def fake_update_grid(self):
+        return None
+
+    async def fake_refresh_loop(self):
+        return None
+
+    monkeypatch.setattr(GridTrader, "_update_grid", fake_update_grid)
+    monkeypatch.setattr(GridTrader, "_refresh_loop", fake_refresh_loop)
+
+    trader = GridTrader(
+        account=account,
+        market_name="TEST-USD",
+        grid_step=Decimal("10"),
+        level_count=4,
+        order_size_usd=Decimal("10"),
+        lower_bound=Decimal("90"),
+        upper_bound=Decimal("130"),
+    )
+
+    await trader.start()
+    sides = [slot.side for slot in trader._slots]
+    assert sides == [OrderSide.BUY, OrderSide.BUY, OrderSide.SELL, OrderSide.SELL]
+    await trader.stop()
+
+
+@pytest.mark.asyncio
+async def test_start_errors_when_all_price_sources_missing(monkeypatch):
+    async def fake_get_markets():
+        market = SimpleNamespace(
+            name="TEST-USD",
+            trading_config=SimpleNamespace(price_precision=1),
+            last_price=None,
+            oracle_price=None,
+        )
+        return {"TEST-USD": market}
+
+    async def fake_mass_cancel(markets=None):  # pragma: no cover - simple stub
+        return None
+
+    client = SimpleNamespace(get_markets=fake_get_markets, mass_cancel=fake_mass_cancel)
+    account = StubAccount(client)
+
+    async def fake_call_with_retries(fn, limiter=None):
+        return await fn()
+
+    monkeypatch.setattr("grid_main.call_with_retries", fake_call_with_retries)
+
+    async def fake_create_order_book(self):
+        return EmptyOrderBook()
+
+    monkeypatch.setattr(GridTrader, "_create_order_book", fake_create_order_book)
+
+    async def fake_update_grid(self):
+        return None
+
+    async def fake_refresh_loop(self):
+        return None
+
+    monkeypatch.setattr(GridTrader, "_update_grid", fake_update_grid)
+    monkeypatch.setattr(GridTrader, "_refresh_loop", fake_refresh_loop)
+
+    trader = GridTrader(
+        account=account,
+        market_name="TEST-USD",
+        grid_step=Decimal("10"),
+        level_count=4,
+        order_size_usd=Decimal("10"),
+        lower_bound=Decimal("90"),
         upper_bound=Decimal("130"),
     )
 

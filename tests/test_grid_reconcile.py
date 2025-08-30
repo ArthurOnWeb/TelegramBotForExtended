@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 from decimal import Decimal
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -133,6 +134,68 @@ async def test_update_grid_cancels_orphans(monkeypatch, caplog):
     assert any(c.get("order_external_id") == "orphan" for c in cancel_calls)
     assert any(c.get("order_id") == 3 for c in cancel_calls)
     assert any("reconcile cancel orphan order" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_update_grid_skips_recent_orders(monkeypatch):
+    trader = GridTrader(
+        account=StubAccount(),
+        market_name="TEST-USD",
+        grid_step=Decimal("1"),
+        level_count=1,
+        order_size_usd=Decimal("10"),
+        lower_bound=Decimal("0"),
+        upper_bound=Decimal("100"),
+    )
+    trader._market = SimpleNamespace(
+        name="TEST-USD",
+        trading_config=SimpleNamespace(
+            calculate_order_size_from_value=lambda value, price: value / price,
+            min_order_size=Decimal("0"),
+        ),
+    )
+    trader._tick = Decimal("1")
+    trader._slots = [Slot("tracked", Decimal("10"), OrderSide.BUY)]
+    trader._buy_slots = trader._slots
+
+    tracked_order = SimpleNamespace(external_id="tracked", id=1, price=Decimal("10"), side=OrderSide.BUY)
+    recent_order = SimpleNamespace(external_id="recent", id=2, price=Decimal("11"), side=OrderSide.SELL)
+    orphan_order = SimpleNamespace(external_id="orphan", id=3, price=Decimal("12"), side=OrderSide.BUY)
+
+    async def fake_get_open_orders(market_names=None):
+        return SimpleNamespace(data=[tracked_order, recent_order, orphan_order])
+
+    trader.account.get_async_client = lambda: SimpleNamespace(account=SimpleNamespace(get_open_orders=fake_get_open_orders))
+
+    cancel_calls = []
+
+    async def fake_cancel_order(**kwargs):
+        cancel_calls.append(kwargs)
+
+    trader.client = SimpleNamespace(cancel_order=fake_cancel_order)
+
+    async def fake_call_with_retries(fn, limiter=None):
+        return await fn()
+
+    monkeypatch.setattr("grid_main.call_with_retries", fake_call_with_retries)
+
+    # mark the recent order as newly created
+    trader._recent_orders["recent"] = asyncio.get_running_loop().time()
+
+    async def fake_ensure_order(*args, **kwargs):
+        return None
+
+    async def fake_cancel_slot(slots, idx):
+        slots[idx] = Slot(None, slots[idx].price, slots[idx].side)
+
+    monkeypatch.setattr(trader, "_ensure_order", fake_ensure_order)
+    monkeypatch.setattr(trader, "_cancel_slot", fake_cancel_slot)
+
+    await trader._update_grid()
+
+    # should cancel only the orphan order, not the recent one
+    assert any(c.get("order_external_id") == "orphan" for c in cancel_calls)
+    assert not any(c.get("order_external_id") == "recent" for c in cancel_calls)
 
 
 @pytest.mark.asyncio

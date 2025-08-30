@@ -14,7 +14,8 @@ import os
 import signal
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
-from typing import Optional, List
+from typing import Optional, List, Dict
+from datetime import datetime, timezone
 
 from x10.perpetual.orderbook import OrderBook
 from x10.perpetual.orders import OrderSide
@@ -102,6 +103,11 @@ class GridTrader:
         self._tick: Decimal | None = None
         self._closing = asyncio.Event()
         self._refresh_task: asyncio.Task | None = None
+
+        # Track recently created orders to avoid cancelling them before they
+        # are recorded in ``_slots``.
+        self._recent_orders: Dict[str, float] = {}
+        self._orphan_grace = 2.0  # seconds
 
     # ------------------------------------------------------------------
     async def _create_order_book(self) -> OrderBook:
@@ -297,6 +303,7 @@ class GridTrader:
 
         new_external_id = uuid_external_id("grid", side.name.lower(), idx)
         previous_id = slot.external_id
+        self._recent_orders[new_external_id] = asyncio.get_running_loop().time()
 
         async def _place(prev_id: Optional[str], px: Decimal, s: OrderSide):
             size = _order_size(px)
@@ -346,6 +353,7 @@ class GridTrader:
                     result,
                 )
                 slots[idx] = Slot(None, price, side)
+                self._recent_orders.pop(new_external_id, None)
                 return
 
             status = getattr(order, "status", None)
@@ -410,6 +418,7 @@ class GridTrader:
                             previous_id,
                         )
                 slots[idx] = Slot(None, price, side)
+                self._recent_orders.pop(new_external_id, None)
                 return
             slots[idx] = Slot(new_external_id, price, side)
         except Exception as e:
@@ -458,6 +467,7 @@ class GridTrader:
                             previous_id,
                         )
                 slots[idx] = Slot(None, price, side)
+                self._recent_orders.pop(new_external_id, None)
                 return
             # Known SDK race: transient RuntimeError("Lock is not acquired")
             elif isinstance(e, RuntimeError) and "lock is not acquired" in msg:
@@ -574,6 +584,12 @@ class GridTrader:
         if self._tick is None:
             return
 
+        now = asyncio.get_running_loop().time()
+        # prune expired recent orders
+        for ext_id, ts in list(self._recent_orders.items()):
+            if now - ts > self._orphan_grace:
+                self._recent_orders.pop(ext_id, None)
+
         open_ids: set[str] = set()
         try:
             async_client = self.account.get_async_client()
@@ -587,6 +603,15 @@ class GridTrader:
             }
             for order in open_orders:
                 ext_id = getattr(order, "external_id", None)
+                ts = self._recent_orders.get(ext_id)
+                if ts is not None and now - ts < self._orphan_grace:
+                    logger.debug(
+                        "skip orphan cancel | market=%s ext_id=%s age=%.2f",
+                        self._market.name if self._market else "?",
+                        ext_id,
+                        now - ts,
+                    )
+                    continue
                 if not ext_id or ext_id not in expected_ids:
                     async def _cancel(order=order):
                         if getattr(order, "external_id", None):
@@ -594,25 +619,38 @@ class GridTrader:
                         return await self.client.cancel_order(order_id=order.id)
                     try:
                         await call_with_retries(_cancel, limiter=self._limiter)
+                        slot_idx = next(
+                            (i for i, s in enumerate(self._slots) if s.external_id == ext_id),
+                            None,
+                        )
                         logger.warning(
-                            "reconcile cancel orphan order | market=%s ext_id=%s id=%s",
+                            "reconcile cancel orphan order | market=%s ext_id=%s id=%s slot=%s ts=%s",
                             self._market.name if self._market else "?",
                             ext_id,
                             getattr(order, "id", None),
+                            slot_idx,
+                            datetime.now(timezone.utc).isoformat(),
                         )
                     except Exception:
+                        slot_idx = next(
+                            (i for i, s in enumerate(self._slots) if s.external_id == ext_id),
+                            None,
+                        )
                         logger.exception(
-                            "reconcile cancel failed | market=%s ext_id=%s id=%s",
+                            "reconcile cancel failed | market=%s ext_id=%s id=%s slot=%s ts=%s",
                             self._market.name if self._market else "?",
                             ext_id,
                             getattr(order, "id", None),
+                            slot_idx,
+                            datetime.now(timezone.utc).isoformat(),
                         )
                 else:
                     open_ids.add(ext_id)
         except Exception:
             logger.exception(
-                "reconcile fetch open orders failed | market=%s",
+                "reconcile fetch open orders failed | market=%s ts=%s",
                 self._market.name if self._market else "?",
+                datetime.now(timezone.utc).isoformat(),
             )
             # Avoid triggering slot cancellation when we couldn't retrieve the
             # current order state.  A brief pause reduces noisy logs if the

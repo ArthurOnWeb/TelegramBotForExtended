@@ -139,11 +139,39 @@ class GridTrader:
         if bid and ask:
             mid = (Decimal(bid.price) + Decimal(ask.price)) / 2
         else:
-            last = getattr(self._market, "last_price", None) or getattr(
-                self._market, "oracle_price", None
+            # Inspect market level information for a reasonable price.
+            stats = getattr(self._market, "market_stats", None) or getattr(
+                self._market, "marketStats", None
             )
-            if last is not None:
-                mid = Decimal(str(last))
+            if stats:
+                bid_stat = getattr(stats, "bid_price", None) or getattr(
+                    stats, "bidPrice", None
+                )
+                ask_stat = getattr(stats, "ask_price", None) or getattr(
+                    stats, "askPrice", None
+                )
+                if bid_stat is not None and ask_stat is not None:
+                    try:
+                        mid = (Decimal(str(bid_stat)) + Decimal(str(ask_stat))) / 2
+                    except Exception:
+                        mid = None
+                if mid is None:
+                    raw = (
+                        getattr(stats, "mark_price", None)
+                        or getattr(stats, "index_price", None)
+                        or getattr(stats, "last_price", None)
+                        or getattr(stats, "markPrice", None)
+                        or getattr(stats, "indexPrice", None)
+                        or getattr(stats, "lastPrice", None)
+                    )
+                    if raw is not None:
+                        mid = Decimal(str(raw))
+            if mid is None:
+                last = getattr(self._market, "last_price", None) or getattr(
+                    self._market, "oracle_price", None
+                )
+                if last is not None:
+                    mid = Decimal(str(last))
         if mid is None:
             # Final fallback: query ticker or recent trades via the client
             price: Decimal | None = None

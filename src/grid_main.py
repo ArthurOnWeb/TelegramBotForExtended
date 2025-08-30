@@ -349,7 +349,8 @@ class GridTrader:
                 return
 
             status = getattr(order, "status", None)
-            if status != "PLACED":
+            accepted_statuses = {"PLACED", "NEW", "OPEN", "ACCEPTED"}
+            if status not in accepted_statuses:
                 reason = (
                     getattr(order, "reason", None)
                     or getattr(order, "cancel_reason", None)
@@ -386,7 +387,7 @@ class GridTrader:
                         order2 = getattr(result2, "data", None)
                         if order2 is None and getattr(result2, "status", None):
                             order2 = result2
-                        if getattr(order2, "status", None) == "PLACED":
+                        if getattr(order2, "status", None) in accepted_statuses:
                             slots[idx] = Slot(new_external_id, adj, side)
                             return
                     except Exception:

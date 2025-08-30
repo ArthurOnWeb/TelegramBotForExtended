@@ -33,8 +33,9 @@ import logging
 # configured without modifying the source.  If ``GRID_MARKET`` is not provided
 # interactively ask the user which market to trade on.
 MARKET_NAME = os.getenv("GRID_MARKET") or input("Market ? ")
-# Parse levels robustly: avoid int(None) when env is unset
-GRID_LEVELS = int(os.getenv("GRID_LEVELS") or input("how many Levels ? "))
+# Parse level count robustly: avoid int(None) when env is unset.  The value
+# represents the total number of grid levels across both sides.
+GRID_LEVELS = int(os.getenv("GRID_LEVELS") or input("How many total levels? "))
 GRID_SIZE_USD = Decimal(os.getenv("GRID_SIZE_USD", "25"))
 GRID_MIN_PRICE = Decimal(os.getenv("GRID_MIN_PRICE") or input("Min Price ? "))
 GRID_MAX_PRICE = Decimal(os.getenv("GRID_MAX_PRICE") or input("Max Price ? "))
@@ -43,19 +44,25 @@ REFRESH_INTERVAL_SEC = float(os.getenv("GRID_REFRESH_SEC", "5"))
 
 @dataclass
 class Slot:
-    """Track one outstanding order at a grid level."""
+    """Track one outstanding order at a fixed grid level."""
 
     external_id: Optional[str]
-    price: Optional[Decimal]
-    side: OrderSide
+    price: Decimal
+    side: Optional[OrderSide]
 
 
 class GridTrader:
     """Very small grid trading helper.
 
-    The trader keeps ``GRID_LEVELS`` buy orders below the mid price and the same
-    number of sell orders above it.  Orders are sized in USD notional and
-    converted to synthetic amount using the market's trading configuration.
+    ``GRID_LEVELS`` represents the total number of price levels across the
+    entire grid.  Levels below the midpoint start as buy orders and those above
+    as sell orders.  When a buy order fills, the next higher level flips to a
+    sell order; once that sell is executed, the original level becomes a buy
+    again.  This keeps the grid's price points static while alternating sides
+    after each fill.
+
+    Orders are sized in USD notional and converted to synthetic amount using the
+    market's trading configuration.
     """
 
     def __init__(
@@ -80,12 +87,14 @@ class GridTrader:
         self._endpoint_config = account.endpoint_config
         self._limiter = build_rate_limiter()
 
-        self._buy_slots: List[Slot] = [
-            Slot(None, None, OrderSide.BUY) for _ in range(level_count)
+        # Single list of slots covering the entire price range.  ``_buy_slots``
+        # is kept as an alias for backward compatibility with unit tests which
+        # reference it directly.  Populate with dummy buy slots so tests may
+        # invoke ``_ensure_order`` before ``start`` is called.
+        self._slots: List[Slot] = [
+            Slot(None, lower_bound, OrderSide.BUY) for _ in range(level_count)
         ]
-        self._sell_slots: List[Slot] = [
-            Slot(None, None, OrderSide.SELL) for _ in range(level_count)
-        ]
+        self._buy_slots = self._slots  # type: ignore[assignment]
         self._placement_lock = asyncio.Lock()
 
         self._order_book: OrderBook | None = None
@@ -93,8 +102,6 @@ class GridTrader:
         self._tick: Decimal | None = None
         self._closing = asyncio.Event()
         self._refresh_task: asyncio.Task | None = None
-        self._buy_prices: List[Decimal] = []
-        self._sell_prices: List[Decimal] = []
 
     # ------------------------------------------------------------------
     async def _create_order_book(self) -> OrderBook:
@@ -122,14 +129,15 @@ class GridTrader:
         self._tick = self.get_tick(self._market.trading_config)
 
         mid = (self.min_price + self.max_price) / 2
-        self._buy_prices = [
-            (mid - self.grid_step * (i + 1)).quantize(self._tick, rounding=ROUND_FLOOR)
-            for i in range(self.level_count)
-        ]
-        self._sell_prices = [
-            (mid + self.grid_step * (i + 1)).quantize(self._tick, rounding=ROUND_CEILING)
-            for i in range(self.level_count)
-        ]
+        self._slots = []
+        for i in range(self.level_count):
+            raw = self.min_price + self.grid_step * (i + 1)
+            side = OrderSide.BUY if raw <= mid else OrderSide.SELL
+            price = raw.quantize(
+                self._tick, rounding=ROUND_FLOOR if side == OrderSide.BUY else ROUND_CEILING
+            )
+            self._slots.append(Slot(None, price, side))
+        self._buy_slots = self._slots  # alias rebuild after reassignment
 
         # Clear any stale orders from previous runs
         await call_with_retries(
@@ -164,8 +172,12 @@ class GridTrader:
     async def _refresh_loop(self) -> None:
         while not self._closing.is_set():
             await self._update_grid()
-            active_buys = sum(1 for s in self._buy_slots if s.external_id)
-            active_sells = sum(1 for s in self._sell_slots if s.external_id)
+            active_buys = sum(
+                1 for s in self._slots if s.side == OrderSide.BUY and s.external_id
+            )
+            active_sells = sum(
+                1 for s in self._slots if s.side == OrderSide.SELL and s.external_id
+            )
             logger.info(
                 "grid refresh | active_buys=%d active_sells=%d",
                 active_buys,
@@ -182,7 +194,7 @@ class GridTrader:
         self, slots: List[Slot], side: OrderSide, idx: int, price: Decimal
     ) -> None:
         slot = slots[idx]
-        if slot.external_id and slot.price == price and slot.side == side:
+        if slot.external_id and slot.side == side:
             return
 
         def _order_size(px: Decimal) -> Decimal:
@@ -240,7 +252,7 @@ class GridTrader:
                     str(price),
                     status,
                 )
-                slots[idx] = Slot(None, None, side)
+                slots[idx] = Slot(None, price, side)
                 return
             slots[idx] = Slot(new_external_id, price, side)
         except Exception as e:
@@ -277,7 +289,7 @@ class GridTrader:
                         new_external_id,
                     )
                 # Could not confirm; clear slot to retry later
-                slots[idx] = Slot(None, None, side)
+                slots[idx] = Slot(None, price, side)
                 return
             # Known SDK race: transient RuntimeError("Lock is not acquired")
             elif isinstance(e, RuntimeError) and "lock is not acquired" in msg:
@@ -332,12 +344,12 @@ class GridTrader:
                     previous_id,
                     new_external_id,
                 )
-            slots[idx] = Slot(None, None, side)
+            slots[idx] = Slot(None, price, side)
 
     async def _cancel_slot(self, slots: List[Slot], idx: int) -> None:
         slot = slots[idx]
         if not slot.external_id:
-            slots[idx] = Slot(None, None, slot.side)
+            slots[idx] = Slot(None, slot.price, slot.side)
             return
 
         async def _cancel():
@@ -353,31 +365,60 @@ class GridTrader:
                     idx,
                     slot.external_id,
                 )
-        slots[idx] = Slot(None, None, slot.side)
+        slots[idx] = Slot(None, slot.price, slot.side)
+
+    async def _switch_slot_to_side(self, idx: int, side: OrderSide) -> None:
+        slot = self._slots[idx]
+        if slot.side == side:
+            return
+        await self._cancel_slot(self._slots, idx)
+        self._slots[idx] = Slot(None, slot.price, side)
+
+    async def _on_fill(self, idx: int, side: OrderSide) -> None:
+        price = self._slots[idx].price
+        # deactivate the filled level while waiting for the opposing trade
+        self._slots[idx] = Slot(None, price, None)
+        if side == OrderSide.BUY:
+            if idx + 1 < len(self._slots):
+                await self._switch_slot_to_side(idx + 1, OrderSide.SELL)
+        elif side == OrderSide.SELL and idx > 0:
+            await self._switch_slot_to_side(idx - 1, OrderSide.BUY)
+            await self._ensure_order(self._slots, OrderSide.BUY, idx - 1, self._slots[idx - 1].price)
 
     async def _update_grid(self) -> None:
         if self._tick is None:
             return
 
-        buy_tasks = []
-        sell_tasks = []
-        for i, price in enumerate(self._buy_prices):
-            if self.min_price <= price <= self.max_price:
-                buy_tasks.append(
-                    self._ensure_order(self._buy_slots, OrderSide.BUY, i, price)
-                )
-            else:
-                buy_tasks.append(self._cancel_slot(self._buy_slots, i))
+        open_ids: set[str] = set()
+        try:
+            async_client = self.account.get_async_client()
+            resp = await call_with_retries(
+                lambda: async_client.account.get_open_orders(market_names=[self._market.name]),
+                limiter=self._limiter,
+            )
+            open_orders = resp.data or []
+            open_ids = {
+                getattr(o, "external_id", "") for o in open_orders if getattr(o, "external_id", None)
+            }
+        except Exception:
+            pass
 
-        for i, price in enumerate(self._sell_prices):
+        tasks = []
+        for i, slot in enumerate(self._slots):
+            price = slot.price
+            if slot.side is None:
+                continue
+            if slot.external_id and slot.external_id not in open_ids:
+                await self._on_fill(i, slot.side)
+                slot = self._slots[i]
+                if slot.side is None:
+                    continue
             if self.min_price <= price <= self.max_price:
-                sell_tasks.append(
-                    self._ensure_order(self._sell_slots, OrderSide.SELL, i, price)
-                )
+                tasks.append(self._ensure_order(self._slots, slot.side, i, price))
             else:
-                sell_tasks.append(self._cancel_slot(self._sell_slots, i))
+                tasks.append(self._cancel_slot(self._slots, i))
 
-        await asyncio.gather(*buy_tasks, *sell_tasks)
+        await asyncio.gather(*tasks)
 
 
 # ----------------------------------------------------------------------
@@ -385,7 +426,8 @@ async def main():
     # Ensure logging is configured so warnings/errors are visible
     setup_logging(logging.INFO)
     account = TradingAccount()
-    grid_step = (GRID_MAX_PRICE - GRID_MIN_PRICE) / (2 * GRID_LEVELS)
+    # Spread the entire price range across the total number of levels
+    grid_step = (GRID_MAX_PRICE - GRID_MIN_PRICE) / GRID_LEVELS
     trader = GridTrader(
         account=account,
         market_name=MARKET_NAME,

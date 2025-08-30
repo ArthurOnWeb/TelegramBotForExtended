@@ -128,7 +128,38 @@ class GridTrader:
         self._market = markets[self.market_name]
         self._tick = self.get_tick(self._market.trading_config)
 
-        mid = (self.min_price + self.max_price) / 2
+        # Obtain a live mid price from the order book (or last trade) before
+        # building the grid.  The order book is kept for later refreshes.
+        self._order_book = await self._create_order_book()
+        bid_fn = getattr(self._order_book, "best_bid", None)
+        ask_fn = getattr(self._order_book, "best_ask", None)
+        bid = bid_fn() if bid_fn else None
+        ask = ask_fn() if ask_fn else None
+        mid: Decimal | None = None
+        if bid and ask:
+            mid = (Decimal(bid.price) + Decimal(ask.price)) / 2
+        else:
+            last = getattr(self._market, "last_price", None) or getattr(
+                self._market, "oracle_price", None
+            )
+            if last is not None:
+                mid = Decimal(str(last))
+        if mid is None:
+            if self._order_book:
+                await self._order_book.close()
+            raise RuntimeError("Unable to determine current mid price")
+
+        if mid <= self.min_price or mid >= self.max_price:
+            logger.warning(
+                "mid price outside configured bounds | mid=%s min=%s max=%s",
+                str(mid),
+                str(self.min_price),
+                str(self.max_price),
+            )
+            await self._order_book.close()
+            self._order_book = None
+            raise RuntimeError("grid bounds do not bracket current price")
+
         self._slots = []
         for i in range(self.level_count):
             raw = self.min_price + self.grid_step * (i + 1)
@@ -145,7 +176,6 @@ class GridTrader:
             limiter=self._limiter,
         )
 
-        self._order_book = await self._create_order_book()
         await self._update_grid()
         self._refresh_task = asyncio.create_task(self._refresh_loop())
 

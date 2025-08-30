@@ -139,11 +139,38 @@ class GridTrader:
         if bid and ask:
             mid = (Decimal(bid.price) + Decimal(ask.price)) / 2
         else:
-            last = getattr(self._market, "last_price", None) or getattr(
-                self._market, "oracle_price", None
+            stats = getattr(self._market, "market_stats", None) or getattr(
+                self._market, "marketStats", None
             )
-            if last is not None:
-                mid = Decimal(str(last))
+            if stats:
+                bid_px = getattr(stats, "bidPrice", None) or getattr(
+                    stats, "bid_price", None
+                )
+                ask_px = getattr(stats, "askPrice", None) or getattr(
+                    stats, "ask_price", None
+                )
+                if bid_px is not None and ask_px is not None:
+                    try:
+                        mid = (Decimal(str(bid_px)) + Decimal(str(ask_px))) / 2
+                    except Exception:
+                        mid = None
+                if mid is None:
+                    for attr in (
+                        "markPrice",
+                        "mark_price",
+                        "indexPrice",
+                        "index_price",
+                        "lastPrice",
+                        "last_price",
+                    ):
+                        raw = getattr(stats, attr, None)
+                        if raw is not None:
+                            try:
+                                mid = Decimal(str(raw))
+                                break
+                            except Exception:
+                                mid = None
+            
         if mid is None:
             # Final fallback: query ticker or recent trades via the client
             price: Decimal | None = None

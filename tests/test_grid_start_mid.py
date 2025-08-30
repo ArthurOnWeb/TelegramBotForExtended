@@ -68,6 +68,7 @@ async def test_start_uses_live_mid_for_sides(monkeypatch):
         market = SimpleNamespace(
             name="TEST-USD",
             trading_config=SimpleNamespace(price_precision=1),
+            market_stats=SimpleNamespace(bidPrice=None, askPrice=None),
         )
         return {"TEST-USD": market}
 
@@ -118,6 +119,7 @@ async def test_start_aborts_when_mid_outside_bounds(monkeypatch):
         market = SimpleNamespace(
             name="TEST-USD",
             trading_config=SimpleNamespace(price_precision=1),
+            market_stats=SimpleNamespace(bidPrice=None, askPrice=None),
         )
         return {"TEST-USD": market}
 
@@ -161,13 +163,63 @@ async def test_start_aborts_when_mid_outside_bounds(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_start_uses_stats_when_order_book_empty(monkeypatch):
+    async def fake_get_markets():
+        market = SimpleNamespace(
+            name="TEST-USD",
+            trading_config=SimpleNamespace(price_precision=1),
+            market_stats=SimpleNamespace(bidPrice="99", askPrice="101"),
+        )
+        return {"TEST-USD": market}
+
+    async def fake_mass_cancel(markets=None):  # pragma: no cover - simple stub
+        return None
+
+    client = SimpleNamespace(get_markets=fake_get_markets, mass_cancel=fake_mass_cancel)
+    account = StubAccount(client)
+
+    async def fake_call_with_retries(fn, limiter=None):
+        return await fn()
+
+    monkeypatch.setattr("grid_main.call_with_retries", fake_call_with_retries)
+
+    async def fake_create_order_book(self):
+        return EmptyOrderBook()
+
+    monkeypatch.setattr(GridTrader, "_create_order_book", fake_create_order_book)
+
+    async def fake_update_grid(self):
+        return None
+
+    async def fake_refresh_loop(self):
+        return None
+
+    monkeypatch.setattr(GridTrader, "_update_grid", fake_update_grid)
+    monkeypatch.setattr(GridTrader, "_refresh_loop", fake_refresh_loop)
+
+    trader = GridTrader(
+        account=account,
+        market_name="TEST-USD",
+        grid_step=Decimal("10"),
+        level_count=4,
+        order_size_usd=Decimal("10"),
+        lower_bound=Decimal("90"),
+        upper_bound=Decimal("130"),
+    )
+
+    await trader.start()
+    sides = [slot.side for slot in trader._slots]
+    assert sides == [OrderSide.BUY, OrderSide.SELL, OrderSide.SELL, OrderSide.SELL]
+    await trader.stop()
+
+
+@pytest.mark.asyncio
 async def test_start_uses_ticker_when_order_book_empty(monkeypatch):
     async def fake_get_markets():
         market = SimpleNamespace(
             name="TEST-USD",
             trading_config=SimpleNamespace(price_precision=1),
-            last_price=None,
-            oracle_price=None,
+            market_stats=SimpleNamespace(),
         )
         return {"TEST-USD": market}
 
@@ -225,8 +277,7 @@ async def test_start_errors_when_all_price_sources_missing(monkeypatch):
         market = SimpleNamespace(
             name="TEST-USD",
             trading_config=SimpleNamespace(price_precision=1),
-            last_price=None,
-            oracle_price=None,
+            market_stats=SimpleNamespace(),
         )
         return {"TEST-USD": market}
 

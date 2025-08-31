@@ -411,26 +411,40 @@ class GridTrader:
                     adj = price + (
                         self._tick if side == OrderSide.SELL else -self._tick
                     )
-                    try:
-                        async with self._placement_lock:
-                            result2 = await call_with_retries(
-                                lambda: _place(None, adj, side),
-                                limiter=self._limiter,
-                            )
-                        order2 = getattr(result2, "data", None)
-                        if order2 is None and getattr(result2, "status", None):
-                            order2 = result2
-                        if getattr(order2, "status", None) in accepted_statuses:
-                            slots[idx] = Slot(new_external_id, adj, side)
-                            return
-                    except Exception:
-                        logger.exception(
-                            "order placement post-only adjust failed | market=%s side=%s idx=%d price=%s",
+                    if (
+                        adj % self._tick != 0
+                        or adj < self.min_price
+                        or adj > self.max_price
+                    ):
+                        logger.warning(
+                            "adjusted price out of bounds | market=%s side=%s idx=%d price=%s tick=%s",
                             self._market.name if self._market else "?",
                             side.name,
                             idx,
-                            str(price),
+                            str(adj),
+                            str(self._tick),
                         )
+                    else:
+                        try:
+                            async with self._placement_lock:
+                                result2 = await call_with_retries(
+                                    lambda: _place(None, adj, side),
+                                    limiter=self._limiter,
+                                )
+                            order2 = getattr(result2, "data", None)
+                            if order2 is None and getattr(result2, "status", None):
+                                order2 = result2
+                            if getattr(order2, "status", None) in accepted_statuses:
+                                slots[idx] = Slot(new_external_id, adj, side)
+                                return
+                        except Exception:
+                            logger.exception(
+                                "order placement post-only adjust failed | market=%s side=%s idx=%d price=%s",
+                                self._market.name if self._market else "?",
+                                side.name,
+                                idx,
+                                str(price),
+                            )
                 if previous_id:
                     try:
                         await self._cancel_slot(slots, idx)
@@ -521,26 +535,55 @@ class GridTrader:
             elif ("post-only" in msg) or ("would cross" in msg) or ("immediate match" in msg):
                 if self._tick is not None:
                     adj = price + (self._tick if side == OrderSide.SELL else -self._tick)
-                    try:
-                        async with self._placement_lock:
-                            await call_with_retries(
-                                lambda: _place(None, adj, side),
-                                limiter=self._limiter,
-                            )
-                        slots[idx] = Slot(new_external_id, adj, side)
-                        return
-                    except Exception:
-                        logger.exception(
-                            "order placement post-only adjust failed | market=%s side=%s idx=%d price=%s",
+                    if (
+                        adj % self._tick != 0
+                        or adj < self.min_price
+                        or adj > self.max_price
+                    ):
+                        logger.warning(
+                            "adjusted price out of bounds | market=%s side=%s idx=%d price=%s tick=%s",
                             self._market.name if self._market else "?",
                             side.name,
                             idx,
-                            str(price),
+                            str(adj),
+                            str(self._tick),
                         )
+                    else:
+                        try:
+                            async with self._placement_lock:
+                                await call_with_retries(
+                                    lambda: _place(None, adj, side),
+                                    limiter=self._limiter,
+                                )
+                            slots[idx] = Slot(new_external_id, adj, side)
+                            return
+                        except Exception:
+                            logger.exception(
+                                "order placement post-only adjust failed | market=%s side=%s idx=%d price=%s",
+                                self._market.name if self._market else "?",
+                                side.name,
+                                idx,
+                                str(price),
+                            )
             # Invalid price: either adjust to nearest tick or drop the slot
             elif getattr(e, "code", None) == 1141 or "invalid price value" in msg:
                 if self._tick is not None:
                     adj = (price / self._tick).to_integral_value(rounding=ROUND_HALF_UP) * self._tick
+                    if (
+                        adj % self._tick != 0
+                        or adj < self.min_price
+                        or adj > self.max_price
+                    ):
+                        logger.warning(
+                            "adjusted price out of bounds | market=%s side=%s idx=%d price=%s tick=%s",
+                            self._market.name if self._market else "?",
+                            side.name,
+                            idx,
+                            str(adj),
+                            str(self._tick),
+                        )
+                        slots[idx] = Slot(None, price, side)
+                        return
                     try:
                         async with self._placement_lock:
                             await call_with_retries(

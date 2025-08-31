@@ -13,7 +13,7 @@ import asyncio
 import os
 import signal
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Optional, List, Dict
 from datetime import datetime, timezone
 
@@ -531,6 +531,43 @@ class GridTrader:
                             idx,
                             str(price),
                         )
+            # Invalid price: either adjust to nearest tick or drop the slot
+            elif getattr(e, "code", None) == 1141 or "invalid price value" in msg:
+                if self._tick is not None:
+                    adj = (price / self._tick).to_integral_value(rounding=ROUND_HALF_UP) * self._tick
+                    try:
+                        async with self._placement_lock:
+                            await call_with_retries(
+                                lambda: _place(None, adj, side),
+                                limiter=self._limiter,
+                            )
+                        logger.warning(
+                            "invalid price adjusted | market=%s side=%s idx=%d from=%s to=%s",
+                            self._market.name if self._market else "?",
+                            side.name,
+                            idx,
+                            str(price),
+                            str(adj),
+                        )
+                        slots[idx] = Slot(new_external_id, adj, side)
+                        return
+                    except Exception:
+                        logger.exception(
+                            "order placement invalid-price adjust failed | market=%s side=%s idx=%d price=%s",
+                            self._market.name if self._market else "?",
+                            side.name,
+                            idx,
+                            str(price),
+                        )
+                logger.warning(
+                    "invalid price value | market=%s side=%s idx=%d price=%s",
+                    self._market.name if self._market else "?",
+                    side.name,
+                    idx,
+                    str(price),
+                )
+                slots[idx] = Slot(None, price, side)
+                return
             else:
                 logger.exception(
                     "order placement failed | market=%s side=%s idx=%d price=%s prev_id=%s ext_id=%s",

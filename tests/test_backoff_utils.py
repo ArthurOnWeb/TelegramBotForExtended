@@ -86,3 +86,30 @@ async def test_retry_on_5xx_status_code():
     result = await backoff_utils.call_with_retries(op, limiter=limiter, max_attempts=3, base_delay=0.01)
     assert result == "ok"
     assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stops_retries():
+    backoff_utils = _reload_module()
+    attempts = 0
+    started = asyncio.Event()
+
+    async def op():
+        nonlocal attempts
+        attempts += 1
+        started.set()
+        await asyncio.sleep(1)
+
+    class DummyLimiter:
+        async def acquire(self):
+            pass
+
+    limiter = DummyLimiter()
+    task = asyncio.create_task(
+        backoff_utils.call_with_retries(op, limiter=limiter, max_attempts=5, base_delay=0.01)
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert attempts == 1

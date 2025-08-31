@@ -24,6 +24,8 @@ async def call_with_retries(op, *, limiter, max_attempts=6, base_delay=0.25):
         await limiter.acquire()
         try:
             return await asyncio.wait_for(op(), timeout=REQUEST_TIMEOUT)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:  # noqa: PERF203 - we want to catch broadly
             status_code = getattr(e, "status_code", None)
             msg = str(e)

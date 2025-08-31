@@ -710,7 +710,10 @@ class GridTrader:
             else:
                 tasks.append(self._cancel_slot(self._slots, i))
 
-        await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for idx, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.exception("[update_grid #%d] task failed", idx, exc_info=result)
 
 
 # ----------------------------------------------------------------------

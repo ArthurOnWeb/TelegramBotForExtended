@@ -546,6 +546,7 @@ class GridTrader:
 
         try:
             await call_with_retries(_cancel, limiter=self._limiter)
+            slots[idx] = Slot(None, slot.price, slot.side)
         except Exception as e:
             if not self._is_edit_not_found(e):
                 logger.exception(
@@ -554,7 +555,24 @@ class GridTrader:
                     idx,
                     slot.external_id,
                 )
-        slots[idx] = Slot(None, slot.price, slot.side)
+                if (
+                    slot.side
+                    and self.min_price <= slot.price <= self.max_price
+                ):
+                    try:
+                        await self._ensure_order(
+                            self._slots, slot.side, idx, slot.price
+                        )
+                        return
+                    except Exception:
+                        logger.exception(
+                            "order regeneration failed | market=%s idx=%d side=%s price=%s",
+                            self._market.name if self._market else "?",
+                            idx,
+                            slot.side.name if slot.side else None,
+                            str(slot.price),
+                        )
+            slots[idx] = Slot(None, slot.price, slot.side)
 
     async def _switch_slot_to_side(self, idx: int, side: OrderSide) -> None:
         slot = self._slots[idx]

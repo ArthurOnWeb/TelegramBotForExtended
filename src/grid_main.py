@@ -310,6 +310,12 @@ class GridTrader:
         if slot.external_id and slot.side == side:
             return
 
+        if self._tick is not None:
+            price = price.quantize(
+                self._tick,
+                rounding=ROUND_FLOOR if side == OrderSide.BUY else ROUND_CEILING,
+            )
+
         def _order_size(px: Decimal) -> Decimal:
             return self._market.trading_config.calculate_order_size_from_value(
                 self.order_size_usd, px

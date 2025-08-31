@@ -272,6 +272,20 @@ class GridTrader:
             active_sells = sum(
                 1 for s in self._slots if s.side == OrderSide.SELL and s.external_id
             )
+            expected_total = max(0, len(self._slots) - 1)
+            if (active_buys + active_sells) < expected_total:
+                logger.warning(
+                    "grid refresh | active_total=%d expected_total=%d below expected; repopulating",
+                    active_buys + active_sells,
+                    expected_total,
+                )
+                await self._update_grid()
+                active_buys = sum(
+                    1 for s in self._slots if s.side == OrderSide.BUY and s.external_id
+                )
+                active_sells = sum(
+                    1 for s in self._slots if s.side == OrderSide.SELL and s.external_id
+                )
             logger.info(
                 "grid refresh | active_buys=%d active_sells=%d",
                 active_buys,

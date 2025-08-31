@@ -265,7 +265,12 @@ class GridTrader:
 
     async def _refresh_loop(self) -> None:
         while not self._closing.is_set():
-            await self._update_grid()
+            try:
+                await self._update_grid()
+            except Exception:
+                logger.exception("refresh failed", exc_info=True)
+                await asyncio.sleep(REFRESH_INTERVAL_SEC)
+                continue
             active_buys = sum(
                 1 for s in self._slots if s.side == OrderSide.BUY and s.external_id
             )
@@ -279,7 +284,10 @@ class GridTrader:
                     active_buys + active_sells,
                     expected_total,
                 )
-                await self._update_grid()
+                try:
+                    await self._update_grid()
+                except Exception:
+                    logger.exception("refresh failed", exc_info=True)
                 active_buys = sum(
                     1 for s in self._slots if s.side == OrderSide.BUY and s.external_id
                 )

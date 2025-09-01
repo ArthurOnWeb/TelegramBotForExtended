@@ -101,6 +101,11 @@ class GridTrader:
         self._order_book: OrderBook | None = None
         self._market = None
         self._tick: Decimal | None = None
+        # Precomputed, tick-aligned prices for each grid level.  Populated in
+        # ``start`` once the market tick size is known.  Tests that call
+        # ``_on_fill`` directly may trigger a lazy initialization if this list
+        # is still empty.
+        self._level_prices: List[Decimal] = []
         self._closing = asyncio.Event()
         self._refresh_task: asyncio.Task | None = None
 
@@ -124,6 +129,44 @@ class GridTrader:
             return Decimal(str(min_change))
         prec = getattr(cfg, "price_precision", 2)
         return Decimal(1).scaleb(-prec)
+
+    # ------------------------------------------------------------------
+    def _build_price_levels(self) -> None:
+        """Precompute all grid level prices aligned to the market tick.
+
+        ``grid_step`` may not be an exact multiple of the tick size; in that
+        case we snap it to the nearest tick to avoid cumulative drift when
+        repeatedly adding the step.  The resulting list is stored in
+        ``self._level_prices`` and reused for subsequent order placements.
+        """
+
+        if self._tick is None:
+            return
+
+        if self.grid_step % self._tick != 0:
+            snapped = (
+                (self.grid_step / self._tick)
+                .to_integral_value(rounding=ROUND_HALF_UP)
+                * self._tick
+            )
+            logger.warning(
+                "grid_step adjusted to tick | from=%s to=%s tick=%s",
+                str(self.grid_step),
+                str(snapped),
+                str(self._tick),
+            )
+            self.grid_step = snapped
+
+        levels: List[Decimal] = []
+        price = self.min_price + self.grid_step
+        for _ in range(self.level_count):
+            if price > self.max_price:
+                break
+            levels.append(price.quantize(self._tick, rounding=ROUND_HALF_UP))
+            price += self.grid_step
+
+        self._level_prices = levels
+        self.level_count = len(levels)
 
     # ------------------------------------------------------------------
     async def start(self) -> None:
@@ -223,14 +266,13 @@ class GridTrader:
             await _close_order_book(self._order_book)
             self._order_book = None
             raise RuntimeError("grid bounds do not bracket current price")
-
+        # Precompute all tick-aligned levels and assign sides based on the live
+        # mid price.  ``_level_prices`` is reused for subsequent repopulation so
+        # levels remain consistent across fills.
+        self._build_price_levels()
         self._slots = []
-        for i in range(self.level_count):
-            raw = self.min_price + self.grid_step * (i + 1)
-            side = OrderSide.BUY if raw <= mid else OrderSide.SELL
-            price = raw.quantize(
-                self._tick, rounding=ROUND_FLOOR if side == OrderSide.BUY else ROUND_CEILING
-            )
+        for price in self._level_prices:
+            side = OrderSide.BUY if price <= mid else OrderSide.SELL
             self._slots.append(Slot(None, price, side))
         self._buy_slots = self._slots  # alias rebuild after reassignment
 
@@ -706,21 +748,25 @@ class GridTrader:
         self._slots[idx] = Slot(None, slot.price, side)
 
     async def _on_fill(self, idx: int, side: OrderSide) -> None:
+        if not self._level_prices and self._tick is not None:
+            self._build_price_levels()
         price = self._slots[idx].price
         # deactivate the filled level while waiting for the opposing trade
         self._slots[idx] = Slot(None, price, None)
         if side == OrderSide.BUY:
             if idx + 1 < len(self._slots):
                 await self._switch_slot_to_side(idx + 1, OrderSide.SELL)
-                raw = self.min_price + self.grid_step * (idx + 2)
-                sell_price = raw.quantize(self._tick, rounding=ROUND_CEILING)
+                sell_price = self._level_prices[idx + 1]
                 self._slots[idx + 1] = Slot(None, sell_price, OrderSide.SELL)
                 await self._ensure_order(
                     self._slots, OrderSide.SELL, idx + 1, sell_price
                 )
         elif side == OrderSide.SELL and idx > 0:
             await self._switch_slot_to_side(idx - 1, OrderSide.BUY)
-            await self._ensure_order(self._slots, OrderSide.BUY, idx - 1, self._slots[idx - 1].price)
+            buy_price = self._level_prices[idx - 1]
+            await self._ensure_order(
+                self._slots, OrderSide.BUY, idx - 1, buy_price
+            )
 
     async def _update_grid(self) -> None:
         if self._tick is None:

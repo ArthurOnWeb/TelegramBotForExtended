@@ -71,6 +71,6 @@ async def test_buy_fill_places_sell_order(monkeypatch):
 
     assert captured["side"] == OrderSide.SELL
     assert captured["idx"] == 1
-    assert captured["price"] == Decimal("2.3")
-    assert trader._slots[1].price == Decimal("2.3")
+    assert captured["price"] == Decimal("2.2")
+    assert trader._slots[1].price == Decimal("2.2")
     assert trader._slots[1].side == OrderSide.SELL

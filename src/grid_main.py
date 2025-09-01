@@ -311,10 +311,29 @@ class GridTrader:
             return
 
         if self._tick is not None:
-            price = price.quantize(
-                self._tick,
-                rounding=ROUND_FLOOR if side == OrderSide.BUY else ROUND_CEILING,
-            )
+            adj = price.quantize(self._tick, rounding=ROUND_HALF_UP)
+            if adj < self.min_price or adj > self.max_price:
+                logger.warning(
+                    "adjusted price out of bounds | market=%s side=%s idx=%d price=%s tick=%s",
+                    self._market.name if self._market else "?",
+                    side.name,
+                    idx,
+                    str(adj),
+                    str(self._tick),
+                )
+                slots[idx] = Slot(None, price, side)
+                return
+            if adj != price:
+                logger.info(
+                    "price adjusted to tick | market=%s side=%s idx=%d from=%s to=%s tick=%s",
+                    self._market.name if self._market else "?",
+                    side.name,
+                    idx,
+                    str(price),
+                    str(adj),
+                    str(self._tick),
+                )
+            price = adj
 
         def _order_size(px: Decimal) -> Decimal:
             return self._market.trading_config.calculate_order_size_from_value(

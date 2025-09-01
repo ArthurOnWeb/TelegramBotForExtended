@@ -33,7 +33,7 @@ class FakeInvalidPrice(Exception):
 
 
 @pytest.mark.asyncio
-async def test_invalid_price_adjusts_with_tick(monkeypatch):
+async def test_invalid_price_adjusts_with_tick(monkeypatch, caplog):
     trader = GridTrader(
         account=StubAccount(),
         market_name="TEST-USD",
@@ -56,8 +56,6 @@ async def test_invalid_price_adjusts_with_tick(monkeypatch):
 
     async def fake_create_and_place_order(**kwargs):
         calls.append(kwargs)
-        if len(calls) == 1:
-            raise FakeInvalidPrice()
         return SimpleNamespace(data=SimpleNamespace(status="PLACED"), error=None)
 
     trader.client = SimpleNamespace(create_and_place_order=fake_create_and_place_order)
@@ -67,13 +65,16 @@ async def test_invalid_price_adjusts_with_tick(monkeypatch):
 
     monkeypatch.setattr("grid_main.call_with_retries", fake_call_with_retries)
 
+    caplog.set_level(logging.INFO, logger="extended_bot")
+
     await trader._ensure_order(trader._buy_slots, OrderSide.BUY, 0, Decimal("50.03"))
 
-    assert len(calls) == 2
-    assert calls[1]["price"] == Decimal("50.0")
+    assert len(calls) == 1
+    assert calls[0]["price"] == Decimal("50.0")
     slot = trader._buy_slots[0]
     assert slot.price == Decimal("50.0")
     assert slot.external_id is not None
+    assert any("price adjusted to tick" in rec.message for rec in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -156,7 +157,7 @@ async def test_invalid_price_adjust_out_of_bounds(monkeypatch, caplog):
 
     await trader._ensure_order(trader._buy_slots, OrderSide.BUY, 0, Decimal("150.03"))
 
-    assert len(calls) == 1
+    assert len(calls) == 0
     slot = trader._buy_slots[0]
     assert slot.external_id is None
     assert any("adjusted price out of bounds" in rec.message for rec in caplog.records)

@@ -315,7 +315,8 @@ class GridTrader:
                 active_sells = sum(
                     1 for s in self._slots if s.side == OrderSide.SELL and s.external_id
                 )
-                expected_total = max(0, len(self._slots) - 1)
+                total_slots = sum(1 for s in self._slots if s.side is not None)
+                expected_total = max(0, total_slots - 1)
                 if (active_buys + active_sells) < expected_total:
                     logger.warning(
                         "grid refresh | active_total=%d expected_total=%d below expected; repopulating",
@@ -329,6 +330,8 @@ class GridTrader:
                     active_sells = sum(
                         1 for s in self._slots if s.side == OrderSide.SELL and s.external_id
                     )
+                    total_slots = sum(1 for s in self._slots if s.side is not None)
+                    expected_total = max(0, total_slots - 1)
                 logger.info(
                     "grid refresh | active_buys=%d active_sells=%d",
                     active_buys,
@@ -846,11 +849,32 @@ class GridTrader:
             await asyncio.sleep(0.1)
             return
 
+        if not self._level_prices and self._tick is not None:
+            self._build_price_levels()
+
+        mid_price: Decimal | None = None
+        if self._order_book:
+            try:
+                bid_fn = getattr(self._order_book, "best_bid", None)
+                ask_fn = getattr(self._order_book, "best_ask", None)
+                bid = bid_fn().price if bid_fn else None
+                ask = ask_fn().price if ask_fn else None
+                if bid is not None and ask is not None:
+                    mid_price = (Decimal(bid) + Decimal(ask)) / 2
+            except Exception:
+                mid_price = None
+        if mid_price is None and self._level_prices:
+            mid_price = self._level_prices[len(self._level_prices) // 2]
+        if mid_price is None:
+            mid_price = (self.min_price + self.max_price) / 2
+
         tasks = []
         for i, slot in enumerate(self._slots):
             price = slot.price
             if slot.side is None:
-                continue
+                side = OrderSide.BUY if price <= mid_price else OrderSide.SELL
+                self._slots[i] = Slot(slot.external_id, price, side)
+                slot = self._slots[i]
             if slot.external_id and slot.external_id not in open_ids:
                 await self._on_fill(i, slot.side)
                 slot = self._slots[i]

@@ -1,6 +1,7 @@
 """Helper to retry REST calls with exponential backoff."""
 
 import asyncio
+import contextlib
 import os
 import random
 import re
@@ -23,7 +24,14 @@ async def call_with_retries(op, *, limiter, max_attempts=6, base_delay=0.25):
         attempt += 1
         await limiter.acquire()
         try:
-            return await asyncio.wait_for(op(), timeout=REQUEST_TIMEOUT)
+            task = asyncio.create_task(op())
+            try:
+                return await asyncio.wait_for(task, timeout=REQUEST_TIMEOUT)
+            except asyncio.TimeoutError:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                raise
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: PERF203 - we want to catch broadly

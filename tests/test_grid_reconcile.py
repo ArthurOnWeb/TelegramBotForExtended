@@ -247,3 +247,79 @@ async def test_update_grid_logs_fetch_failure(monkeypatch, caplog):
     assert any(
         "reconcile fetch open orders failed" in rec.message for rec in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_cancel_timeout_triggers_reconcile(monkeypatch):
+    trader = GridTrader(
+        account=StubAccount(),
+        market_name="TEST-USD",
+        grid_step=Decimal("1"),
+        level_count=1,
+        order_size_usd=Decimal("10"),
+        lower_bound=Decimal("0"),
+        upper_bound=Decimal("100"),
+    )
+    trader._market = SimpleNamespace(
+        name="TEST-USD",
+        trading_config=SimpleNamespace(
+            calculate_order_size_from_value=lambda value, price: value / price,
+            min_order_size=Decimal("0"),
+        ),
+    )
+    trader._tick = Decimal("1")
+    trader._slots = [Slot("abc", Decimal("200"), OrderSide.SELL)]
+    trader._buy_slots = trader._slots
+
+    cancel_calls = []
+
+    async def fake_cancel_order(order_external_id=None, **kwargs):
+        cancel_calls.append(order_external_id)
+        if len(cancel_calls) == 1:
+            raise asyncio.TimeoutError()
+        return SimpleNamespace()
+
+    trader.client = SimpleNamespace(cancel_order=fake_cancel_order)
+
+    async def fake_call_with_retries(fn, limiter=None):
+        return await fn()
+
+    monkeypatch.setattr("grid_main.call_with_retries", fake_call_with_retries)
+
+    scheduled: list = []
+    original_create_task = asyncio.create_task
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(asyncio, "create_task", fake_create_task)
+
+    await trader._cancel_slot(trader._slots, 0)
+
+    assert trader._slots[0].external_id == "abc"
+    assert len(scheduled) == 1
+    scheduled[0].close()
+
+    monkeypatch.setattr(asyncio, "create_task", original_create_task)
+
+    open_order = SimpleNamespace(
+        external_id="abc", id=1, price=Decimal("200"), side=OrderSide.SELL
+    )
+
+    async def fake_get_open_orders(market_names=None):
+        return SimpleNamespace(data=[open_order])
+
+    trader.account.get_async_client = lambda: SimpleNamespace(
+        account=SimpleNamespace(get_open_orders=fake_get_open_orders)
+    )
+
+    async def fake_ensure_order(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(trader, "_ensure_order", fake_ensure_order)
+
+    await trader._update_grid()
+
+    assert trader._slots[0].external_id is None
+    assert len(cancel_calls) == 2

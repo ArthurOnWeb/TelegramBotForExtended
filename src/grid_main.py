@@ -13,7 +13,14 @@ import asyncio
 import os
 import signal
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
+from decimal import (
+    Decimal,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_UP,
+    ROUND_DOWN,
+    ROUND_UP,
+)
 from typing import Optional, List, Dict
 from datetime import datetime, timezone
 
@@ -356,7 +363,9 @@ class GridTrader:
             return
 
         if self._tick is not None:
-            adj = price.quantize(self._tick, rounding=ROUND_HALF_UP)
+            orig_price = price
+            rounding = ROUND_DOWN if side == OrderSide.BUY else ROUND_UP
+            adj = price.quantize(self._tick, rounding=rounding)
             if adj < self.min_price or adj > self.max_price:
                 logger.warning(
                     "adjusted price out of bounds | market=%s side=%s idx=%d price=%s tick=%s",
@@ -366,19 +375,30 @@ class GridTrader:
                     str(adj),
                     str(self._tick),
                 )
-                slots[idx] = Slot(None, price, side)
+                slots[idx] = Slot(None, orig_price, side)
                 return
-            if adj != price:
+            if adj != orig_price:
                 logger.info(
                     "price adjusted to tick | market=%s side=%s idx=%d from=%s to=%s tick=%s",
                     self._market.name if self._market else "?",
                     side.name,
                     idx,
-                    str(price),
+                    str(orig_price),
                     str(adj),
                     str(self._tick),
                 )
             price = adj
+            if price % self._tick != 0:
+                logger.warning(
+                    "price not aligned to tick | market=%s side=%s idx=%d price=%s tick=%s",
+                    self._market.name if self._market else "?",
+                    side.name,
+                    idx,
+                    str(price),
+                    str(self._tick),
+                )
+                slots[idx] = Slot(None, orig_price, side)
+                return
 
         def _order_size(px: Decimal) -> Decimal:
             return self._market.trading_config.calculate_order_size_from_value(

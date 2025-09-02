@@ -113,3 +113,37 @@ async def test_cancelled_stops_retries():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_timeout_cleanup():
+    os.environ["MM_REQUEST_TIMEOUT"] = "0.05"
+    backoff_utils = _reload_module()
+    cancelled = False
+
+    async def slow_op():
+        nonlocal cancelled
+        try:
+            await asyncio.sleep(1)
+        finally:
+            cancelled = True
+
+    class DummyLimiter:
+        async def acquire(self):
+            pass
+
+    limiter = DummyLimiter()
+    with pytest.raises(asyncio.TimeoutError):
+        await backoff_utils.call_with_retries(
+            slow_op, limiter=limiter, max_attempts=1, base_delay=0.01
+        )
+
+    assert cancelled
+
+    async def fast_op():
+        return "ok"
+
+    result = await backoff_utils.call_with_retries(
+        fast_op, limiter=limiter, max_attempts=1, base_delay=0.01
+    )
+    assert result == "ok"

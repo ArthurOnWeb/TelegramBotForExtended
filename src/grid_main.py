@@ -9,6 +9,7 @@ moves or an existing order is filled.  The implementation mirrors the style of
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import signal
@@ -21,7 +22,7 @@ from decimal import (
     ROUND_DOWN,
     ROUND_UP,
 )
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from datetime import datetime, timezone
 
 from x10.perpetual.orderbook import OrderBook
@@ -37,17 +38,43 @@ import logging
 
 # --- Configuration ----------------------------------------------------------------------
 
-# Expose a few basic parameters via environment variables so the bot can be
-# configured without modifying the source.  If ``GRID_MARKET`` is not provided
-# interactively ask the user which market to trade on.
-MARKET_NAME = os.getenv("GRID_MARKET") or input("Market ? ")
-# Parse level count robustly: avoid int(None) when env is unset.  The value
-# represents the total number of grid levels across both sides.
-GRID_LEVELS = int(os.getenv("GRID_LEVELS") or input("How many total levels? "))
-GRID_SIZE_USD = Decimal(os.getenv("GRID_SIZE_USD", "25"))
-GRID_MIN_PRICE = Decimal(os.getenv("GRID_MIN_PRICE") or input("Min Price ? "))
-GRID_MAX_PRICE = Decimal(os.getenv("GRID_MAX_PRICE") or input("Max Price ? "))
-REFRESH_INTERVAL_SEC = float(os.getenv("GRID_REFRESH_SEC", "5"))
+parser = argparse.ArgumentParser(description="Grid Trading Bot for Extended / X10")
+parser.add_argument("--market", "-m", type=str, help="Market name (e.g., HYPE-USD)")
+parser.add_argument("--levels", "-l", type=int, default=10, help="Total grid levels (default: 10)")
+parser.add_argument("--min-price", "-min", type=float, default=44.0, help="Min price (default: 44)")
+parser.add_argument("--max-price", "-max", type=float, default=47.0, help="Max price (default: 47)")
+parser.add_argument("--order-size", "-s", type=float, default=25.0, help="Order size in USD (default: 25)")
+parser.add_argument("--refresh", "-r", type=float, default=5.0, help="Refresh interval in seconds (default: 5)")
+
+args = parser.parse_args()
+
+def get_input(prompt, default=None, type_func=None):
+    """Robust input with default and type conversion."""
+    try:
+        value = input(f"{prompt} [{default}] " if default else prompt) or default
+        if value is None:
+            raise ValueError("No default and empty input")
+        if type_func:
+            return type_func(value)
+        return value
+    except (ValueError, TypeError) as e:
+        logger.warning("Invalid input for %s: %s, using default %s", prompt, str(e), default)
+        return default
+
+# Prioritize args > env > input/defaults
+MARKET_NAME = args.market or os.getenv("GRID_MARKET") or get_input("Market ?", type_func=str)
+if not MARKET_NAME:
+    raise ValueError("Market name is required (use --market or env GRID_MARKET)")
+
+GRID_LEVELS = args.levels or (int(os.getenv("GRID_LEVELS", "10")) if os.getenv("GRID_LEVELS") else get_input("How many total levels?", default=10, type_func=int))
+GRID_SIZE_USD = Decimal(str(args.order_size or os.getenv("GRID_SIZE_USD", "25")))
+GRID_MIN_PRICE = Decimal(str(args.min_price or os.getenv("GRID_MIN_PRICE") or get_input("Min Price ?", default="44", type_func=str)))
+GRID_MAX_PRICE = Decimal(str(args.max_price or os.getenv("GRID_MAX_PRICE") or get_input("Max Price ?", default="47", type_func=str)))
+REFRESH_INTERVAL_SEC = float(args.refresh or os.getenv("GRID_REFRESH_SEC", "5"))
+
+setup_logging(logging.INFO)  # Setup early for config logging
+logger.info("Configuration: market=%s, levels=%d, size_usd=%s, min_price=%s, max_price=%s, refresh_sec=%s",
+            MARKET_NAME, GRID_LEVELS, str(GRID_SIZE_USD), str(GRID_MIN_PRICE), str(GRID_MAX_PRICE), REFRESH_INTERVAL_SEC)
 
 
 @dataclass
@@ -177,7 +204,6 @@ class GridTrader:
 
     # ------------------------------------------------------------------
     async def start(self) -> None:
-        setup_logging(logging.INFO)
         markets = await self.client.get_markets()
         if self.market_name not in markets:
             raise RuntimeError(f"Market {self.market_name} introuvable.")
@@ -722,7 +748,7 @@ class GridTrader:
                         idx,
                         previous_id,
                     )
-            slots[idx] = Slot(None, price, side)
+        slots[idx] = Slot(None, price, side)
 
     async def _cancel_slot(self, slots: List[Slot], idx: int) -> None:
         slot = slots[idx]
@@ -757,27 +783,6 @@ class GridTrader:
         await self._cancel_slot(self._slots, idx)
         self._slots[idx] = Slot(None, slot.price, side)
 
-    async def _on_fill(self, idx: int, side: OrderSide) -> None:
-        if not self._level_prices and self._tick is not None:
-            self._build_price_levels()
-        price = self._slots[idx].price
-        # deactivate the filled level while waiting for the opposing trade
-        self._slots[idx] = Slot(None, price, None)
-        if side == OrderSide.BUY:
-            if idx + 1 < len(self._slots):
-                await self._switch_slot_to_side(idx + 1, OrderSide.SELL)
-                sell_price = self._level_prices[idx + 1]
-                self._slots[idx + 1] = Slot(None, sell_price, OrderSide.SELL)
-                await self._ensure_order(
-                    self._slots, OrderSide.SELL, idx + 1, sell_price
-                )
-        elif side == OrderSide.SELL and idx > 0:
-            await self._switch_slot_to_side(idx - 1, OrderSide.BUY)
-            buy_price = self._level_prices[idx - 1]
-            await self._ensure_order(
-                self._slots, OrderSide.BUY, idx - 1, buy_price
-            )
-
     async def _update_grid(self) -> None:
         if self._tick is None:
             return
@@ -788,7 +793,9 @@ class GridTrader:
             if now - ts > self._orphan_grace:
                 self._recent_orders.pop(ext_id, None)
 
+        # Step 1: Fetch open orders and detect potential fills/orphans
         open_ids: set[str] = set()
+        potential_fills: List[Tuple[int, str]] = []  # (idx, external_id) for slots missing from open
         try:
             async_client = self.account.get_async_client()
             resp = await call_with_retries(
@@ -796,69 +803,104 @@ class GridTrader:
                 limiter=self._limiter,
             )
             open_orders = resp.data or []
-            expected_ids = {
-                s.external_id for s in self._slots if getattr(s, "external_id", None)
-            }
+            expected_ids = {s.external_id for s in self._slots if s.external_id}
             for order in open_orders:
                 ext_id = getattr(order, "external_id", None)
-                ts = self._recent_orders.get(ext_id)
-                if ts is not None and now - ts < self._orphan_grace:
-                    logger.debug(
-                        "skip orphan cancel | market=%s ext_id=%s age=%.2f",
-                        self._market.name if self._market else "?",
-                        ext_id,
-                        now - ts,
-                    )
-                    continue
-                if not ext_id or ext_id not in expected_ids:
-                    async def _cancel(order=order):
-                        if getattr(order, "external_id", None):
-                            return await self.client.cancel_order(order_external_id=order.external_id)
-                        return await self.client.cancel_order(order_id=order.id)
-                    try:
-                        await call_with_retries(_cancel, limiter=self._limiter)
-                        slot_idx = next(
-                            (i for i, s in enumerate(self._slots) if s.external_id == ext_id),
-                            None,
-                        )
-                        logger.warning(
-                            "reconcile cancel orphan order | market=%s ext_id=%s id=%s slot=%s ts=%s",
-                            self._market.name if self._market else "?",
-                            ext_id,
-                            getattr(order, "id", None),
-                            slot_idx,
-                            datetime.now(timezone.utc).isoformat(),
-                        )
-                    except Exception:
-                        slot_idx = next(
-                            (i for i, s in enumerate(self._slots) if s.external_id == ext_id),
-                            None,
-                        )
-                        logger.exception(
-                            "reconcile cancel failed | market=%s ext_id=%s id=%s slot=%s ts=%s",
-                            self._market.name if self._market else "?",
-                            ext_id,
-                            getattr(order, "id", None),
-                            slot_idx,
-                            datetime.now(timezone.utc).isoformat(),
-                        )
-                else:
+                if ext_id in expected_ids:
                     open_ids.add(ext_id)
+                else:
+                    # Orphan: cancel if not recent
+                    ts = self._recent_orders.get(ext_id)
+                    if ts is None or now - ts > self._orphan_grace:
+                        try:
+                            if ext_id:
+                                await call_with_retries(
+                                    lambda: self.client.cancel_order(order_external_id=ext_id),
+                                    limiter=self._limiter,
+                                )
+                            else:
+                                await call_with_retries(
+                                    lambda: self.client.cancel_order(order_id=getattr(order, "id", None)),
+                                    limiter=self._limiter,
+                                )
+                            logger.warning(
+                                "cancelled orphan | market=%s ext_id=%s id=%s",
+                                self._market.name,
+                                ext_id,
+                                getattr(order, "id", None),
+                            )
+                        except Exception:
+                            logger.exception("orphan cancel failed | ext_id=%s", ext_id)
+
+            # Detect potential fills: expected but not open
+            for i, slot in enumerate(self._slots):
+                if slot.external_id and slot.external_id not in open_ids:
+                    potential_fills.append((i, slot.external_id))
         except Exception:
-            logger.exception(
-                "reconcile fetch open orders failed | market=%s ts=%s",
-                self._market.name if self._market else "?",
-                datetime.now(timezone.utc).isoformat(),
-            )
-            # Avoid triggering slot cancellation when we couldn't retrieve the
-            # current order state.  A brief pause reduces noisy logs if the
-            # failure persists.
+            logger.exception("fetch open orders failed | market=%s", self._market.name)
             await asyncio.sleep(0.1)
             return
 
-        if not self._level_prices and self._tick is not None:
-            self._build_price_levels()
+        # Step 1.5: Confirm actual fills by querying order status
+        fills: List[Tuple[int, Decimal, OrderSide, str]] = []  # (idx, price, confirmed_side, ext_id)
+        for idx, ext_id in potential_fills:
+            try:
+                # Query order to confirm fill and get side
+                order_resp = await call_with_retries(
+                    lambda: self.client.get_order(order_external_id=ext_id),
+                    limiter=self._limiter,
+                )
+                order = getattr(order_resp, "data", None) or order_resp
+                status = getattr(order, "status", None)
+                if status in ("FILLED", "CLOSED", "EXECUTED"):  # Adjust based on SDK statuses
+                    confirmed_side = getattr(order, "side", None)
+                    if confirmed_side:
+                        side = OrderSide.BUY if confirmed_side == "BUY" else OrderSide.SELL  # Map string to enum
+                    else:
+                        side = self._slots[idx].side  # Fallback
+                    price = getattr(order, "price", self._slots[idx].price)
+                    fills.append((idx, price, side, ext_id))
+                    logger.info("Confirmed fill at level %d price %s side %s ext_id %s", idx, str(price), side.name, ext_id)
+                else:
+                    logger.debug("Missing order not filled: %s status %s", ext_id, status)
+            except Exception as e:
+                logger.warning("Failed to query order %s: %s", ext_id, str(e))
+                # Treat as potential fill with slot side
+                fills.append((idx, self._slots[idx].price, self._slots[idx].side, ext_id))
 
+        # Clear filled slots' external_ids
+        for idx, _, _, ext_id in fills:
+            self._slots[idx] = Slot(None, self._slots[idx].price, self._slots[idx].side)
+
+        # Step 2: Handle confirmed fills - place opposites and ensure extremes
+        protected_idxs = set()  # Slots to protect from reassignment
+        tasks = []
+        for idx, price, fill_side, _ in fills:
+            opposite_side = OrderSide.SELL if fill_side == OrderSide.BUY else OrderSide.BUY
+            logger.info("Placing opposite %s at filled level %d price %s (confirmed fill %s)", opposite_side.name, idx, str(price), fill_side.name)
+            self._slots[idx] = Slot(None, price, opposite_side)
+            protected_idxs.add(idx)
+            tasks.append(self._ensure_order(self._slots, opposite_side, idx, price))
+            
+            # Ensure extreme based on fill side: if BUY fill (price down), add SELL at highest; if SELL fill (price up), add BUY at lowest
+            extreme_idx = len(self._slots) - 1 if fill_side == OrderSide.BUY else 0
+            extreme_side = OrderSide.SELL if fill_side == OrderSide.BUY else OrderSide.BUY
+            extreme_price = self._level_prices[extreme_idx]
+            extreme_slot = self._slots[extreme_idx]
+            if extreme_slot.side != extreme_side or not extreme_slot.external_id:
+                logger.info("Ensuring extreme %s at level %d price %s after %s fill", extreme_side.name, extreme_idx, str(extreme_price), fill_side.name)
+                self._slots[extreme_idx] = Slot(None, extreme_price, extreme_side)
+                protected_idxs.add(extreme_idx)
+                tasks.append(self._ensure_order(self._slots, extreme_side, extreme_idx, extreme_price))
+
+        # Await fill handling tasks concurrently
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.exception("Fill handling task %d failed", i, exc_info=result)
+
+        # Step 3: Get current mid
         mid_price: Decimal | None = None
         if self._order_book:
             try:
@@ -874,67 +916,100 @@ class GridTrader:
             mid_price = self._level_prices[len(self._level_prices) // 2]
         if mid_price is None:
             mid_price = (self.min_price + self.max_price) / 2
+        logger.info("Current mid_price: %s", str(mid_price))
 
-        tasks = []
+        # Step 4: Dynamically reassign sides for non-protected slots, excluding nearest
+        nearest_idx = None
+        min_dist = Decimal('inf')
+        for i, price in enumerate(self._level_prices):
+            dist = abs(price - mid_price)
+            if dist < min_dist:
+                min_dist = dist
+                nearest_idx = i
+        if nearest_idx is not None:
+            logger.info("Nearest level: %d at %s (excluding from orders)", nearest_idx, str(self._level_prices[nearest_idx]))
+            protected_idxs.add(nearest_idx)  # Also protect nearest
+
+        # Collect cancels and ensures, sequential for cancels
+        cancel_tasks = []
+        ensure_tasks = []
         for i, slot in enumerate(self._slots):
             price = slot.price
-            if slot.side is None:
-                side = OrderSide.BUY if price <= mid_price else OrderSide.SELL
-                self._slots[i] = Slot(slot.external_id, price, side)
-                slot = self._slots[i]
-            if slot.external_id and slot.external_id not in open_ids:
-                await self._on_fill(i, slot.side)
-                slot = self._slots[i]
-                if slot.side is None:
-                    continue
-            if self.min_price <= price <= self.max_price:
-                tasks.append(self._ensure_order(self._slots, slot.side, i, price))
-            else:
-                tasks.append(self._cancel_slot(self._slots, i))
+            if i in protected_idxs:
+                # Protect: ensure order if side set and within bounds, but don't change side
+                if slot.side is not None and self.min_price <= price <= self.max_price and not slot.external_id:
+                    ensure_tasks.append(self._ensure_order(self._slots, slot.side, i, price))
+                elif i == nearest_idx:
+                    # Explicitly cancel nearest if active
+                    if slot.external_id:
+                        cancel_tasks.append(self._cancel_slot(self._slots, i))
+                    self._slots[i] = Slot(None, price, None)
+                continue
+            
+            new_side = OrderSide.BUY if price <= mid_price else OrderSide.SELL
+            if slot.side != new_side:
+                # Side change: cancel and assign new
+                if slot.external_id:
+                    cancel_tasks.append(self._cancel_slot(self._slots, i))
+                self._slots[i] = Slot(None, price, new_side)
+            
+            # Ensure if within bounds and has side (non-nearest)
+            if self.min_price <= price <= self.max_price and slot.side is not None and i != nearest_idx:
+                ensure_tasks.append(self._ensure_order(self._slots, slot.side, i, price))
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for idx, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.exception("[update_grid #%d] task failed", idx, exc_info=result)
+        # Step 5: Await cancels sequentially
+        for task in cancel_tasks:
+            try:
+                await asyncio.wait_for(task, timeout=10.0)  # Short timeout per cancel
+            except asyncio.TimeoutError:
+                logger.warning("Cancel timed out")
+            except Exception:
+                logger.exception("Sequential cancel failed")
 
+        # Step 6: Await ensures concurrently
+        if ensure_tasks:
+            results = await asyncio.gather(*ensure_tasks, return_exceptions=True)
+            for idx, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.exception("[ensure_order #%d] failed", idx, exc_info=result)
 
-# ----------------------------------------------------------------------
+        # Log active counts
+        active_buys = sum(1 for s in self._slots if s.side == OrderSide.BUY and s.external_id)
+        active_sells = sum(1 for s in self._slots if s.side == OrderSide.SELL and s.external_id)
+        logger.info("grid refresh | active_buys=%d active_sells=%d", active_buys, active_sells)
+
 async def main():
-    # Ensure logging is configured so warnings/errors are visible
-    setup_logging(logging.INFO)
     account = TradingAccount()
-    # Spread the entire price range across the total number of levels
-    grid_step = (GRID_MAX_PRICE - GRID_MIN_PRICE) / GRID_LEVELS
-    trader = GridTrader(
+    
+    # Create grid trader instance
+    grid_trader = GridTrader(
         account=account,
         market_name=MARKET_NAME,
-        grid_step=grid_step,
+        grid_step=Decimal('0.01'),  # Default step, will be adjusted based on market tick size
         level_count=GRID_LEVELS,
         order_size_usd=GRID_SIZE_USD,
         lower_bound=GRID_MIN_PRICE,
         upper_bound=GRID_MAX_PRICE,
     )
-
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(trader.stop()))
-        except NotImplementedError:
-            # Fallback for platforms without loop signal handlers (e.g. Windows)
-            # Use a sync signal handler to request shutdown via the closing flag;
-            # the main loop will exit and the finally block will call stop().
-            signal.signal(sig, lambda s, f, lp=loop: lp.call_soon_threadsafe(trader._closing.set))
-
-    await trader.start()
-    logger.info("[grid] started on %s", MARKET_NAME)
-
+    
+    # Initialize logging
+    setup_logging(logging.INFO)
+    
+    # Start the grid trader
+    await grid_trader.start()
+    print(f"[grid] started on {MARKET_NAME} with {GRID_LEVELS} levels")
+    
+    # Main execution loop - wait for the refresh task to complete
     try:
-        while not trader._closing.is_set():
-            await asyncio.sleep(1.0)
+        # Wait for the refresh task to complete (it runs continuously)
+        await grid_trader._refresh_task
+    except asyncio.CancelledError:
+        print("\n[grid] cancellation requested")
+    except KeyboardInterrupt:
+        print("\n[grid] interrupted by user")
     finally:
-        await trader.stop()
-        logger.info("[grid] stopped.")
-
+        await grid_trader.stop()
+        print("[grid] stopped.")
 
 if __name__ == "__main__":
     asyncio.run(main())

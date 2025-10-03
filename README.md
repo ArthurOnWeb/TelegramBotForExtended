@@ -255,3 +255,73 @@ EOF
 
 python -m src.maker_main
 ```
+
+## Grid Trading Strategy
+
+The repository now includes an arithmetic grid trading strategy (`src/grid_main.py`) that implements:
+
+### Features
+- **Arithmetic Grid Levels**: Equally spaced price levels between min and max prices
+- **Automatic Rebalancing**: Replaces orders when price moves significantly
+- **Boundary Handling**: Converts all levels to buy/sell when price moves outside grid
+- **Position Management**: Respects maximum position limits
+- **Order Management**: Tracks order fills and manages active orders
+
+### Configuration
+Create a `.env` file with grid-specific parameters:
+
+```ini
+# Grid Strategy Configuration
+GRID_MARKET=ETH-USD
+GRID_MIN_PRICE=2500.00
+GRID_MAX_PRICE=3500.00
+GRID_LEVELS=10
+GRID_ORDER_USD=100
+GRID_MAX_POSITION_USD=1000
+GRID_REBALANCE_THRESHOLD=0.01
+GRID_REFRESH_INTERVAL=1.0
+GRID_MAX_ORDER_AGE=300
+```
+
+### Running the Grid Strategy
+
+```bash
+# Using environment variables
+GRID_MARKET=ETH-USD python -m src.grid_main
+
+# Or with interactive prompt
+python -m src.grid_main
+```
+
+### How It Works
+
+1. **Grid Setup**: Calculates arithmetic grid levels between min and max prices
+2. **Price Monitoring**: Continuously monitors current market price
+3. **Order Placement**: 
+   - Places buy orders below current price
+   - Places sell orders above current price  
+   - Leaves closest grid level empty
+4. **Rebalancing**: Replaces orders when price moves beyond threshold
+5. **Boundary Handling**: Converts all levels to buy/sell when price moves outside grid
+
+### Testing
+
+A test script is available to validate grid calculations:
+
+```bash
+python test_grid_strategy.py
+```
+
+### Example Scenario
+
+With `GRID_MIN_PRICE=2500`, `GRID_MAX_PRICE=3500`, `GRID_LEVELS=10`:
+- Grid levels: 2500, 2600, 2700, ..., 3500
+- Current price: 3000 → Buy orders at 2500-2900, Sell orders at 3100-3500
+- Price moves to 3050 → Rebalance triggered
+- New setup: Buy orders at 2500-3000, Sell orders at 3100-3500
+- Price drops to 2400 → All levels become buy orders
+
+### Risk Management
+- Respects `GRID_MAX_POSITION_USD` to prevent over-exposure
+- Uses post-only orders to avoid market impact
+- Implements rate limiting and error handling
